@@ -438,13 +438,13 @@ class FlxAction implements IFlxDestroyable
 		_x = null;
 		_y = null;
 
-		if (_timestamp == FlxG.game.ticks)
+		if (_timestamp == FlxG.game.stepCount)
 		{
 			triggered = _checked;
-			return _checked; // run no more than once per frame
+			return _checked; // run no more than once per update step
 		}
 
-		_timestamp = FlxG.game.ticks;
+		_timestamp = FlxG.game.stepCount;
 		_checked = false;
 
 		var len = inputs != null ? inputs.length : 0;

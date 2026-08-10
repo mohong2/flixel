@@ -79,6 +79,14 @@ class FlxGame extends Sprite
 	public var ticks(default, null):Int = 0;
 
 	/**
+	 * Per-update-step counter. Incremented once per game logic update (`step()`).
+	 * With `separateUpdateDraw` enabled a single draw frame may run multiple
+	 * updates, so per-frame caches must key on this (not on `ticks`, which is
+	 * a millisecond timestamp refreshed once per draw frame).
+	 */
+	public var stepCount(default, null):Int = 0;
+
+	/**
 	 * Enables or disables the filters set via `setFilters()`.
 	 */
 	public var filtersEnabled:Bool = true;
@@ -769,6 +777,8 @@ class FlxGame extends Sprite
 	 */
 	function step():Void
 	{
+		stepCount++;
+
 		// Handle game reset request
 		if (_resetGame)
 		{

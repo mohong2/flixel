@@ -674,7 +674,9 @@ class FlxSprite extends FlxObject
 		// Fast path for simple sprites (angle=0, scale=1, no flip/blend/shader, single camera).
 		// Tile render + non pixel-perfect only; culling matches isOnScreen (viewOffset-aware),
 		// so visible sprites are never dropped when zoom < 1.
+		// rotated/flipped frames have a non-identity tileMatrix; the fast path would draw them wrong
 		if (angle == 0 && scale.x == 1 && scale.y == 1 && !flipX && !flipY && blend == null && shader == null
+			&& _frame.angle == FlxFrameAngle.ANGLE_0 && !_frame.flipX && !_frame.flipY
 			&& FlxG.renderTile && !pixelPerfectPosition && cameras.length == 1)
 		{
 			final cam = cameras[0];
