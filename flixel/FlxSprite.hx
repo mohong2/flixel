@@ -674,9 +674,14 @@ class FlxSprite extends FlxObject
 		// Fast path for simple sprites (angle=0, scale=1, no flip/blend/shader, single camera).
 		// Tile render + non pixel-perfect only; culling matches isOnScreen (viewOffset-aware),
 		// so visible sprites are never dropped when zoom < 1.
-		// rotated/flipped frames have a non-identity tileMatrix; the fast path would draw them wrong
+		// rotated/flipped frames have a non-identity tileMatrix; the fast path would draw them wrong.
+		// frames with a non-zero offset have their content shifted inside the atlas bitmap
+		// (paint() copies to a possibly negative dest point); the fast path would drop the offset
+		// and clip the content, so they must use the standard tileMatrix path instead.
 		if (angle == 0 && scale.x == 1 && scale.y == 1 && !flipX && !flipY && blend == null && shader == null
 			&& _frame.angle == FlxFrameAngle.ANGLE_0 && !_frame.flipX && !_frame.flipY
+			&& (animation.curAnim == null || (!animation.curAnim.flipX && !animation.curAnim.flipY))
+			&& _frame.offset.x == 0 && _frame.offset.y == 0
 			&& FlxG.renderTile && !pixelPerfectPosition && cameras.length == 1)
 		{
 			final cam = cameras[0];
@@ -735,6 +740,13 @@ class FlxSprite extends FlxObject
 			_point.floor();
 
 		_point.copyToFlash(_flashPoint);
+		// 负 frame.offset 支持：paint() 已把内容平移到非负区域（位图内），
+		// 绘制位置需要把偏移量加回去，否则内容会整体偏移。
+		if (_frame.offset.x < 0 || _frame.offset.y < 0)
+		{
+			_flashPoint.x += _frame.offset.x;
+			_flashPoint.y += _frame.offset.y;
+		}
 		camera.copyPixels(_frame, framePixels, _flashRect, _flashPoint, colorTransform, blend, antialiasing);
 	}
 
@@ -755,6 +767,11 @@ class FlxSprite extends FlxObject
 
 		_point.add(origin.x, origin.y);
 		_matrix.translate(_point.x, _point.y);
+
+		// 负 frame.offset 支持（blit 模式）：paint() 已把内容平移到非负区域，
+		// 这里把偏移量加回绘制位置，避免 flip/旋转的角色错位。
+		if (FlxG.renderBlit && (_frame.offset.x < 0 || _frame.offset.y < 0))
+			_matrix.translate(_frame.offset.x, _frame.offset.y);
 
 		if (isPixelPerfectRender(camera))
 		{

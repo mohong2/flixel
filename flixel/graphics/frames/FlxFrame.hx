@@ -300,9 +300,13 @@ class FlxFrame implements IFlxDestroyable
 
 		if (angle == FlxFrameAngle.ANGLE_0)
 		{
+			// 负 offset 支持：checkInputBitmap 已扩大输出位图，
+			// 这里把内容画到非负位置（偏移量 shiftX/shiftY）。
+			var shiftX:Float = offset.x < 0 ? -offset.x : 0;
+			var shiftY:Float = offset.y < 0 ? -offset.y : 0;
 			offset.copyToFlash(point2);
-			point2.x += point.x;
-			point2.y += point.y;
+			point2.x += point.x + shiftX;
+			point2.y += point.y + shiftY;
 			bmd.copyPixels(parent.bitmap, frame.copyToFlash(rect), point2, null, null, mergeAlpha);
 		}
 		else
@@ -352,6 +356,9 @@ class FlxFrame implements IFlxDestroyable
 		var doFlipY = flipY != this.flipY;
 
 		prepareTransformedBlitMatrix(matrix, rotation, doFlipX, doFlipY);
+		// 负 offset 支持：把内容平移到非负区域，避免 bmd.draw 裁剪
+		if (offset.x < 0 || offset.y < 0)
+			matrix.translate(-offset.x * (doFlipX ? -1 : 1), -offset.y * (doFlipY ? -1 : 1));
 		matrix.translate(point.x, point.y);
 		var rect:Rectangle = getDrawFrameRect(matrix);
 		bmd.draw(parent.bitmap, matrix, null, null, rect);
