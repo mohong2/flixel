@@ -533,11 +533,11 @@ class FlxCamera extends FlxBasic
 		var itemToReturn = null;
 		var blendInt:Int = FlxDrawBaseItem.blendToInt(blend);
 
+
+		// Vertex colors are baked into FlxDrawQuadsItem, so tint/offset no longer split batches.
 		if (_currentDrawItem != null
 			&& _currentDrawItem.type == FlxDrawItemType.TILES
 			&& _headTiles.graphics == graphic
-			&& _headTiles.colored == colored
-			&& _headTiles.hasColorOffsets == hasColorOffsets
 			&& _headTiles.blending == blendInt
 			&& _headTiles.blend == blend
 			&& _headTiles.antialiasing == smooth

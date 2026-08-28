@@ -21,6 +21,8 @@ class FlxDrawQuadsItem extends FlxDrawBaseItem<FlxDrawQuadsItem>
 	var alphas:Array<Float>;
 	var colorMultipliers:Array<Float>;
 	var colorOffsets:Array<Float>;
+	/** True when this batch contains non-identity vertex colors. */
+	var hasVertexColors:Bool = false;
 
 	public function new()
 	{
@@ -41,6 +43,7 @@ class FlxDrawQuadsItem extends FlxDrawBaseItem<FlxDrawQuadsItem>
 			colorMultipliers.splice(0, colorMultipliers.length);
 		if (colorOffsets != null)
 			colorOffsets.splice(0, colorOffsets.length);
+		hasVertexColors = false;
 	}
 
 	override public function dispose():Void
@@ -72,35 +75,38 @@ class FlxDrawQuadsItem extends FlxDrawBaseItem<FlxDrawQuadsItem>
 		for (i in 0...VERTICES_PER_QUAD)
 			alphas.push(alphaVal);
 
-		if (colored || hasColorOffsets)
+		// Always write vertex colors so different tints/offsets can share a texture batch.
+		if (colorMultipliers == null)
+			colorMultipliers = [];
+
+		if (colorOffsets == null)
+			colorOffsets = [];
+
+		var rMult = transform != null ? transform.redMultiplier : 1;
+		var gMult = transform != null ? transform.greenMultiplier : 1;
+		var bMult = transform != null ? transform.blueMultiplier : 1;
+		var rOff = transform != null ? transform.redOffset : 0.0;
+		var gOff = transform != null ? transform.greenOffset : 0.0;
+		var bOff = transform != null ? transform.blueOffset : 0.0;
+		var aOff = transform != null ? transform.alphaOffset : 0.0;
+
+		if (transform != null
+			&& (rMult != 1 || gMult != 1 || bMult != 1
+				|| rOff != 0 || gOff != 0 || bOff != 0 || aOff != 0))
+			hasVertexColors = true;
+
+		for (i in 0...VERTICES_PER_QUAD)
 		{
-			if (colorMultipliers == null)
-				colorMultipliers = [];
+			colorMultipliers.push(rMult);
+			colorMultipliers.push(gMult);
+			colorMultipliers.push(bMult);
 
-			if (colorOffsets == null)
-				colorOffsets = [];
+			colorOffsets.push(rOff);
+			colorOffsets.push(gOff);
+			colorOffsets.push(bOff);
+			colorOffsets.push(aOff);
 
-			var rMult = transform != null ? transform.redMultiplier : 1;
-			var gMult = transform != null ? transform.greenMultiplier : 1;
-			var bMult = transform != null ? transform.blueMultiplier : 1;
-			var rOff = transform != null ? transform.redOffset : 0.0;
-			var gOff = transform != null ? transform.greenOffset : 0.0;
-			var bOff = transform != null ? transform.blueOffset : 0.0;
-			var aOff = transform != null ? transform.alphaOffset : 0.0;
-
-			for (i in 0...VERTICES_PER_QUAD)
-			{
-				colorMultipliers.push(rMult);
-				colorMultipliers.push(gMult);
-				colorMultipliers.push(bMult);
-
-				colorOffsets.push(rOff);
-				colorOffsets.push(gOff);
-				colorOffsets.push(bOff);
-				colorOffsets.push(aOff);
-
-				colorMultipliers.push(1);
-			}
+			colorMultipliers.push(1);
 		}
 	}
 
@@ -118,14 +124,20 @@ class FlxDrawQuadsItem extends FlxDrawBaseItem<FlxDrawQuadsItem>
 		shader.bitmap.filter = (camera.antialiasing || antialiasing) ? LINEAR : NEAREST;
 		shader.alpha.value = alphas;
 
-		if (colored || hasColorOffsets)
+		// Use the color path only when this batch has non-identity vertex colors.
+		if (hasVertexColors)
 		{
 			shader.colorMultiplier.value = colorMultipliers;
 			shader.colorOffset.value = colorOffsets;
 		}
+		else
+		{
+			shader.colorMultiplier.value = null;
+			shader.colorOffset.value = null;
+		}
 
 		setParameterValue(shader.hasTransform, true);
-		setParameterValue(shader.hasColorTransform, colored || hasColorOffsets);
+		setParameterValue(shader.hasColorTransform, hasVertexColors);
 
 		#if (openfl > "8.7.0")
 		camera.canvas.graphics.overrideBlendMode(blend);

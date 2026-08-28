@@ -147,6 +147,12 @@ class FlxText extends FlxSprite
 	var _regen:Bool = true;
 
 	/**
+	 * Rasterization scale for the current text bitmap.
+	 * 1 keeps the original path; higher values keep text crisp when scaled up.
+	 */
+	var _textRenderScale:Float = 1;
+
+	/**
 	 * Helper vars to draw border styles with transparency.
 	 */
 	var _borderPixels:BitmapData;
@@ -771,9 +777,44 @@ class FlxText extends FlxSprite
 		dirty = true;
 	}
 
+	/**
+	 * Target pixel density for FlxText rendering: logical scene scale times
+	 * window scale, clamped to [1, 4].
+	 */
+	function getTextRenderScale():Float
+	{
+		var result:Float = 1;
+		try
+		{
+			if (FlxG.scaleMode != null)
+				result = FlxG.scaleMode.scale.x;
+
+			if (FlxG.stage != null && FlxG.stage.window != null)
+				result *= FlxG.stage.window.scale;
+		}
+		catch (e:Dynamic) {}
+
+		if (result < 1)
+			result = 1;
+		if (result > 4)
+			result = 4;
+
+		return result;
+	}
+
 	function regenGraphic():Void
 	{
-		if (textField == null || !_regen)
+		if (textField == null)
+			return;
+
+		var renderScale:Float = getTextRenderScale();
+		if (Math.abs(renderScale - _textRenderScale) > 0.001)
+		{
+			_textRenderScale = renderScale;
+			_regen = true;
+		}
+
+		if (!_regen)
 			return;
 
 		var oldWidth:Int = 0;
@@ -792,24 +833,30 @@ class FlxText extends FlxSprite
 		// prevent text height from shrinking on flash if text == ""
 		if (textField.textHeight == 0)
 		{
-			newHeight = oldHeight;
+			newHeight = oldHeight / _textRenderScale;
 		}
 
-		if (oldWidth != newWidth || oldHeight != newHeight)
+		var pixelWidth:Int = Std.int(Math.max(1, newWidth * _textRenderScale));
+		var pixelHeight:Int = Std.int(Math.max(1, newHeight * _textRenderScale));
+
+		if (oldWidth != pixelWidth || oldHeight != pixelHeight)
 		{
-			// Need to generate a new buffer to store the text graphic
-			height = newHeight;
+			// Need to generate a new buffer to store the text graphic.
+			// Bitmap pixels use the render scale; logical width/height stay unchanged.
 			var key:String = FlxG.bitmap.getUniqueKey("text");
-			makeGraphic(Std.int(newWidth), Std.int(newHeight), FlxColor.TRANSPARENT, false, key);
+			makeGraphic(pixelWidth, pixelHeight, FlxColor.TRANSPARENT, false, key);
+
+			// makeGraphic() resets size to the high-res bitmap; restore logical size.
+			width = newWidth;
+			height = newHeight;
 
 			if (_hasBorderAlpha)
 				_borderPixels = graphic.bitmap.clone();
-			frameHeight = Std.int(height);
-			textField.height = height * 1.2;
+			textField.height = newHeight * 1.2;
 			_flashRect.x = 0;
 			_flashRect.y = 0;
-			_flashRect.width = newWidth;
-			_flashRect.height = newHeight;
+			_flashRect.width = pixelWidth;
+			_flashRect.height = pixelHeight;
 		}
 		else // Else just clear the old buffer before redrawing the text
 		{
@@ -829,6 +876,8 @@ class FlxText extends FlxSprite
 			copyTextFormat(_defaultFormat, _formatAdjusted);
 
 			_matrix.identity();
+			if (_textRenderScale != 1)
+				_matrix.scale(_textRenderScale, _textRenderScale);
 
 			applyBorderStyle();
 			applyBorderTransparency();
@@ -897,7 +946,39 @@ class FlxText extends FlxSprite
 	override public function draw():Void
 	{
 		regenGraphic();
-		super.draw();
+
+		// Draw the high-res bitmap in logical coordinates with an equivalent origin.
+		if (_textRenderScale > 1)
+		{
+			var oldScaleX:Float = scale.x;
+			var oldScaleY:Float = scale.y;
+			var oldOriginX:Float = origin.x;
+			var oldOriginY:Float = origin.y;
+
+			// Map the high-res center origin back to the logical coordinate space.
+			var logicalOriginX:Float = oldOriginX / _textRenderScale;
+			var logicalOriginY:Float = oldOriginY / _textRenderScale;
+			var scaleXDenom:Float = 1 - oldScaleX / _textRenderScale;
+			var scaleYDenom:Float = 1 - oldScaleY / _textRenderScale;
+			var newOriginX:Float = 0;
+			var newOriginY:Float = 0;
+			if (Math.abs(scaleXDenom) > 0.0001)
+				newOriginX = logicalOriginX * (1 - oldScaleX) / scaleXDenom;
+			if (Math.abs(scaleYDenom) > 0.0001)
+				newOriginY = logicalOriginY * (1 - oldScaleY) / scaleYDenom;
+
+			scale.set(oldScaleX / _textRenderScale, oldScaleY / _textRenderScale);
+			origin.set(newOriginX, newOriginY);
+
+			super.draw();
+
+			scale.set(oldScaleX, oldScaleY);
+			origin.set(oldOriginX, oldOriginY);
+		}
+		else
+		{
+			super.draw();
+		}
 	}
 
 	/**
