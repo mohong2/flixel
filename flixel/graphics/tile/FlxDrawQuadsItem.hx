@@ -23,8 +23,6 @@ class FlxDrawQuadsItem extends FlxDrawBaseItem<FlxDrawQuadsItem>
 	var colorOffsets:Array<Float>;
 	/** True when this batch contains non-identity vertex colors. */
 	var hasVertexColors:Bool = false;
-	/** Number of quads already appended to this batch (used for lazy color backfill). */
-	var quadCount:Int = 0;
 
 	public function new()
 	{
@@ -46,7 +44,6 @@ class FlxDrawQuadsItem extends FlxDrawBaseItem<FlxDrawQuadsItem>
 		if (colorOffsets != null)
 			colorOffsets.splice(0, colorOffsets.length);
 		hasVertexColors = false;
-		quadCount = 0;
 	}
 
 	override public function dispose():Void
@@ -78,6 +75,13 @@ class FlxDrawQuadsItem extends FlxDrawBaseItem<FlxDrawQuadsItem>
 		for (i in 0...VERTICES_PER_QUAD)
 			alphas.push(alphaVal);
 
+		// Always write vertex colors so different tints/offsets can share a texture batch.
+		if (colorMultipliers == null)
+			colorMultipliers = [];
+
+		if (colorOffsets == null)
+			colorOffsets = [];
+
 		var rMult = transform != null ? transform.redMultiplier : 1;
 		var gMult = transform != null ? transform.greenMultiplier : 1;
 		var bMult = transform != null ? transform.blueMultiplier : 1;
@@ -86,72 +90,24 @@ class FlxDrawQuadsItem extends FlxDrawBaseItem<FlxDrawQuadsItem>
 		var bOff = transform != null ? transform.blueOffset : 0.0;
 		var aOff = transform != null ? transform.alphaOffset : 0.0;
 
-		var isColored:Bool = transform != null
+		if (transform != null
 			&& (rMult != 1 || gMult != 1 || bMult != 1
-				|| rOff != 0 || gOff != 0 || bOff != 0 || aOff != 0);
+				|| rOff != 0 || gOff != 0 || bOff != 0 || aOff != 0))
+			hasVertexColors = true;
 
-		if (isColored)
+		for (i in 0...VERTICES_PER_QUAD)
 		{
-			if (!hasVertexColors)
-			{
-				if (colorMultipliers == null)
-					colorMultipliers = [];
-				if (colorOffsets == null)
-					colorOffsets = [];
+			colorMultipliers.push(rMult);
+			colorMultipliers.push(gMult);
+			colorMultipliers.push(bMult);
 
-				// Backfill identity colors for quads that were added while this batch
-				// was still all-default, so the color arrays stay quad-aligned.
-				var q:Int = 0;
-				while (q < quadCount)
-				{
-					for (v in 0...VERTICES_PER_QUAD)
-					{
-						colorMultipliers.push(1);
-						colorMultipliers.push(1);
-						colorMultipliers.push(1);
-						colorMultipliers.push(1);
-						colorOffsets.push(0);
-						colorOffsets.push(0);
-						colorOffsets.push(0);
-						colorOffsets.push(0);
-					}
-					q++;
-				}
-				hasVertexColors = true;
-			}
+			colorOffsets.push(rOff);
+			colorOffsets.push(gOff);
+			colorOffsets.push(bOff);
+			colorOffsets.push(aOff);
 
-			for (i in 0...VERTICES_PER_QUAD)
-			{
-				colorMultipliers.push(rMult);
-				colorMultipliers.push(gMult);
-				colorMultipliers.push(bMult);
-				colorMultipliers.push(1);
-
-				colorOffsets.push(rOff);
-				colorOffsets.push(gOff);
-				colorOffsets.push(bOff);
-				colorOffsets.push(aOff);
-			}
+			colorMultipliers.push(1);
 		}
-		else if (hasVertexColors)
-		{
-			// Batch has already been switched to mixed colors; keep identity colors
-			// for this default quad so every quad in the batch stays aligned.
-			for (i in 0...VERTICES_PER_QUAD)
-			{
-				colorMultipliers.push(1);
-				colorMultipliers.push(1);
-				colorMultipliers.push(1);
-				colorMultipliers.push(1);
-
-				colorOffsets.push(0);
-				colorOffsets.push(0);
-				colorOffsets.push(0);
-				colorOffsets.push(0);
-			}
-		}
-
-		quadCount++;
 	}
 
 	#if !flash
