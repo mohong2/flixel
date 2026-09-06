@@ -49,13 +49,10 @@ class FlxGraphicsShader extends GraphicsShader
 
 			color = vec4(color.rgb / color.a, color.a);
 
-			mat4 colorMultiplier = mat4(0);
-			colorMultiplier[0][0] = openfl_ColorMultiplierv.x;
-			colorMultiplier[1][1] = openfl_ColorMultiplierv.y;
-			colorMultiplier[2][2] = openfl_ColorMultiplierv.z;
-			colorMultiplier[3][3] = openfl_ColorMultiplierv.w;
-
-			color = clamp(openfl_ColorOffsetv + (color * colorMultiplier), 0.0, 1.0);
+			// Component-wise multiply instead of building a diagonal mat4 per pixel:
+			// `color * diag(m.x, m.y, m.z, m.w)` == (r*m.x, g*m.y, b*m.z, a*m.w).
+			// Mobile GPUs (Mali/Adreno) don't reliably fold the matrix construction.
+			color = clamp(openfl_ColorOffsetv + vec4(color.rgb * openfl_ColorMultiplierv.rgb, color.a * openfl_ColorMultiplierv.w), 0.0, 1.0);
 
 			if (color.a > 0.0)
 			{

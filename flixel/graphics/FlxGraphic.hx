@@ -333,6 +333,19 @@ class FlxGraphic implements IFlxDestroyable
 	public var canBeDumped(get, never):Bool;
 
 	#if FLX_DRAW_QUADS
+	/**
+	 * Shared quad-batch shader instance used by every FlxGraphic.
+	 *
+	 * All graphics draw with the same GLSL source, so they share the same GL program.
+	 * Sharing one Shader instance (instead of one per graphic) keeps the openfl
+	 * uniform-upload cache effective: its "last writer" check compares against the
+	 * parameter object that performed the upload, so with separate instances every
+	 * batch re-uploads uniforms that never change (matrix, alpha, hasTransform...).
+	 * FlxDrawQuadsItem assigns every parameter (bitmap input, alpha, colors) before
+	 * each `beginShaderFill`, so no per-graphic state can leak between batches.
+	 */
+	private static var __sharedShader:FlxShader;
+
 	public var shader(default, null):FlxShader;
 	#else
 
@@ -414,7 +427,9 @@ class FlxGraphic implements IFlxDestroyable
 		bitmap = Bitmap;
 
 		#if FLX_DRAW_QUADS
-		shader = new FlxShader();
+		if (__sharedShader == null)
+			__sharedShader = new FlxShader();
+		shader = __sharedShader;
 		#end
 	}
 
