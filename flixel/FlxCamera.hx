@@ -1059,6 +1059,13 @@ class FlxCamera extends FlxBasic
 		updateFlash(elapsed);
 		updateFade(elapsed);
 
+		// updateFlash/updateFade run user completion callbacks, which are allowed
+		// to remove (and therefore destroy()) this camera - e.g.
+		// `cam.fade(..., OnComplete, ...)` calling FlxG.cameras.remove(cam, true).
+		// destroy() nulls flashSprite, so everything below needs a liveness check.
+		if (flashSprite == null)
+			return;
+
 		flashSprite.filters = filtersEnabled ? filters : null;
 
 		updateFlashSpritePosition();
