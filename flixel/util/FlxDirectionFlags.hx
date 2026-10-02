@@ -5,7 +5,7 @@ package flixel.util;
  * many `FlxObject` features like `allowCollisions` and `touching`.
  * @since 4.10.0
  */
-@:enum abstract FlxDirectionFlags(Int) from Int from FlxDirection to Int
+enum abstract FlxDirectionFlags(Int) from Int from FlxDirection to Int
 {
 	var LEFT = 0x0001; // FlxDirection.LEFT;
 	var RIGHT = 0x0010; // FlxDirection.RIGHT;

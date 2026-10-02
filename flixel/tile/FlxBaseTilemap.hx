@@ -1379,8 +1379,7 @@ enum FlxTilemapAutoTiling
 	FULL;
 }
 
-@:enum
-abstract FlxTilemapDiagonalPolicy(Int)
+enum abstract FlxTilemapDiagonalPolicy(Int)
 {
 	/**
 	 * No diagonal movement allowed when calculating the path
