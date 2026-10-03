@@ -216,14 +216,22 @@ class FlxGame extends Sprite
 	var _skipSplash:Bool = false;
 
 	/**
-	 * When `true`, updates run at `updateFramerate` via the fixed-timestep
-	 * accumulator, while draws run on every `ENTER_FRAME`.
-	 * This decouples game logic speed from rendering speed.
+	 * When `true`, game logic advances at `FlxG.updateFramerate` through the
+	 * fixed-timestep accumulator, independently of how often frames are presented.
+	 * Rendering still happens on every `ENTER_FRAME`, so `FlxG.drawFramerate` may
+	 * be higher than `FlxG.updateFramerate` (high refresh displays) without making
+	 * the game run faster.
 	 *
-	 * When `false` (default), both update and draw happen on `ENTER_FRAME`
-	 * using the standard accumulator loop (original flixel behavior).
+	 * On `ENTER_FRAME` ticks that ran no logic step, the draw list is not rebuilt:
+	 * the camera canvases still hold the graphics commands for the unchanged world
+	 * and OpenFL re-renders them as part of the display list anyway. See
+	 * `FlxG.separateDrawSkipIdleFrames`.
 	 *
-	 * Requires `fixedTimestep = true` for consistent animation speeds.
+	 * When `false` (default), both update and draw happen on `ENTER_FRAME` using
+	 * the standard accumulator loop (original flixel behavior).
+	 *
+	 * A logic rate that is independent of the display refresh rate requires
+	 * `fixedTimestep = true`.
 	 */
 	public var separateUpdateDraw(get, set):Bool;
 
@@ -233,11 +241,33 @@ class FlxGame extends Sprite
 	var _separateUpdateDraw:Bool = false;
 
 	/**
-	 * Kept for compatibility. Draws always run on `ENTER_FRAME`; this no longer
-	 * throttles anything (see `onEnterFrame`).
+	 * Fraction (`0...1`) of the next logic step that has already elapsed, i.e. the
+	 * accumulator remainder divided by `_stepMS`. This is the classic render
+	 * interpolation alpha (`lerp(previousPosition, position, _drawAccumulator)`).
+	 * Flixel's own renderer does not interpolate; the value is exposed for project code.
 	 */
 	var _drawAccumulator:Float = 0;
-	// -- separateUpdateDraw getter / setter --
+
+	/**
+	 * `true` while the camera canvases hold draw commands that describe the
+	 * current world state, so an idle `ENTER_FRAME` tick can present them
+	 * unchanged instead of rebuilding them.
+	 */
+	var _drawValid:Bool = false;
+
+	/**
+	 * Camera count the draw cache was built with. Adding or removing a camera
+	 * invalidates the cache without needing a signal listener.
+	 */
+	var _drawCameraCount:Int = -1;
+
+	/**
+	 * Filters that were last pushed to this display object's `filters` property.
+	 * `DisplayObject.set_filters()` *clones every filter* on every non-empty
+	 * assignment and marks the object render-dirty, so the value must only be
+	 * written when it actually changes (the old code did it once per logic step).
+	 */
+	var _appliedFilters:Array<BitmapFilter>;
 
 	function get_separateUpdateDraw():Bool
 	{
@@ -252,8 +282,45 @@ class FlxGame extends Sprite
 		_separateUpdateDraw = value;
 		FlxG.separateUpdateDraw = value;
 		_drawAccumulator = 0;
+		_drawValid = false; // the other mode presents differently, rebuild once
+		updateMaxAccumulation();
 
 		return value;
+	}
+
+	/**
+	 * Recomputes `_maxAccumulation`, the catch-up cap for the accumulator.
+	 * Called whenever a framerate or the update/draw mode changes.
+	 *
+	 * Both modes use the same policy: two draw frames of catch-up with a 100ms
+	 * floor. The floor is what matters, because the cap trades "catch up after a
+	 * hitch" against "run a burst of logic steps in one frame", and a cap below
+	 * the real tick interval is silently clamped every tick, which makes the logic
+	 * clock run slower than real time.
+	 *
+	 * Separate mode previously used `max(2000 / updateFramerate, 250)`, which
+	 * allowed up to fifteen logic steps inside a single `ENTER_FRAME` after a
+	 * hitch. Reusing the combined-mode policy gives both modes one documented
+	 * catch-up behaviour and cannot starve the logic clock.
+	 */
+	@:allow(flixel.FlxG)
+	function updateMaxAccumulation():Void
+	{
+		_maxAccumulation = (FlxG.drawFramerate > 0) ? Math.max(2000 / FlxG.drawFramerate - 1, 100) : 100;
+
+		if (_maxAccumulation < _stepMS)
+			_maxAccumulation = _stepMS;
+	}
+
+	/**
+	 * Forces the next `ENTER_FRAME` tick to rebuild the draw list even in
+	 * separate-update mode. Call this after anything that changes the camera
+	 * canvases outside the normal draw path (drawing into `camera.canvas.graphics`
+	 * by hand, replacing a dumped tilesheet bitmap, ...).
+	 */
+	public function invalidateDrawCache():Void
+	{
+		_drawValid = false;
 	}
 
 	#if desktop
@@ -523,6 +590,8 @@ class FlxGame extends Sprite
 	@:allow(flixel.FlxG)
 	function onResize(_):Void
 	{
+		_drawValid = false; // new GL context / resized canvases
+
 		var width:Int = FlxG.stage.stageWidth;
 		var height:Int = FlxG.stage.stageHeight;
 
@@ -596,19 +665,24 @@ class FlxGame extends Sprite
 	// ═══════════════════════════════════════════════════════════════
 
 	/**
-	 * Called every frame by `ENTER_FRAME`. Decides how many updates and draws to do.
+	 * Called every frame by `ENTER_FRAME`. Decides how many logic steps and how
+	 * many draws to run.
 	 *
 	 * Both modes share the same fixed-timestep accumulator, so game logic
 	 * (including Psych's audio-time-based events) always advances in exact
-	 * `updateFramerate` steps and never skips work when a frame is late.
+	 * `updateFramerate` steps.
 	 *
 	 * ##  Combined mode (`separateUpdateDraw = false`)
-	 * Original flixel behaviour: update and draw run together on every frame.
+	 * Original flixel behaviour: the accumulator is drained and `draw()` runs on
+	 * every `ENTER_FRAME`.
 	 *
 	 * ##  Separate mode (`separateUpdateDraw = true`)
-	 * Updates still run via the accumulator at `updateFramerate`; drawing is
-	 * done on every `ENTER_FRAME` so no frame is ever skipped (skipped draws
-	 * presented stale black frames on some platforms).
+	 * Logic is pinned to `FlxG.updateFramerate`; the draw framerate only decides
+	 * how often a frame is *presented*, so it can be higher than the update
+	 * framerate without speeding the game up. On ticks that ran no logic step the
+	 * world is unchanged and the camera canvases already hold the exact graphics
+	 * commands OpenFL is about to re-render from the display list, so the draw list
+	 * is not rebuilt (see `canSkipDraw`).
 	 */
 	function onEnterFrame(_):Void
 	{
@@ -640,34 +714,52 @@ class FlxGame extends Sprite
 				}
 			}
 
+			// Logic steps run by this tick. `0` can only happen in separate mode with
+			// a fixed timestep and a draw rate above the update rate.
+			var steps:Int = 0;
+
 			if (FlxG.fixedTimestep)
 			{
 				_accumulator += _elapsedMS;
-				_accumulator = (_accumulator > _maxAccumulation) ? _maxAccumulation : _accumulator;
+				if (_accumulator > _maxAccumulation)
+					_accumulator = _maxAccumulation; // bounded catch-up, see updateMaxAccumulation()
 
 				while (_accumulator >= _stepMS)
 				{
 					step();
 					_accumulator -= _stepMS;
+					steps++;
 				}
+
+				// Render interpolation alpha (unused by flixel's renderer, see _drawAccumulator).
+				_drawAccumulator = (_stepMS > 0) ? _accumulator / _stepMS : 0;
 			}
 			else
 			{
 				step();
+				steps = 1;
+				_drawAccumulator = 0;
 			}
 
 			#if FLX_DEBUG
 			FlxBasic.visibleCount = 0;
 			#end
 
-			if (separateUpdateDraw)
+			if (canSkipDraw(steps))
 			{
-				// Draw on every ENTER_FRAME. Skipping a draw would present a stale
-				// (black) frame on some platforms, causing the visible flicker that
-				// appeared when separate update/draw mode was enabled. Updates are
-				// still driven by the fixed-timestep accumulator above.
-				_drawAccumulator = 0;
-				draw();
+				// Present-only tick: the canvases already hold the commands for the
+				// unchanged world, so rebuilding them here would record the same commands
+				// again (camera lock/unlock, plugins.draw, _state.draw) - exactly the
+				// per-display-frame cost separate update/draw mode exists to avoid.
+				//
+				// The public draw signals are still dispatched on every presented frame,
+				// because mods subscribe to them and silently dropping them would be an
+				// invisible behaviour change. Note the consequence: a `preDraw` handler
+				// that appends graphics to a camera canvas itself (rather than building
+				// normal flixel objects) must call `FlxGame.invalidateDrawCache()`, since
+				// its commands are only cleared by the next full draw's `cameras.lock()`.
+				FlxG.signals.preDraw.dispatch();
+				FlxG.signals.postDraw.dispatch();
 			}
 			else
 			{
@@ -723,6 +815,10 @@ class FlxGame extends Sprite
 	 */
 	function switchState():Void
 	{
+		// A state switch resets the camera list, so any retained draw commands
+		// describe a world that no longer exists.
+		_drawValid = false;
+
 		// Basic reset stuff
 		FlxG.cameras.reset();
 		FlxG.inputs.onStateSwitch();
@@ -784,8 +880,7 @@ class FlxGame extends Sprite
 		{
 			resetGame();
 			_resetGame = false;
-			if (separateUpdateDraw)
-				_drawAccumulator = 0;
+			_drawValid = false; // resetGame replaces the requested state
 		}
 
 		handleReplayRequests();
@@ -878,7 +973,14 @@ class FlxGame extends Sprite
 		FlxArrayUtil.clearArray(FlxG.swipes);
 		#end
 
-		filters = filtersEnabled ? _filters : null;
+		// DisplayObject.set_filters() clones every filter and marks the object
+		// render-dirty on each non-empty assignment, so only write it on a change.
+		var desiredFilters:Array<BitmapFilter> = filtersEnabled ? _filters : null;
+		if (_appliedFilters != desiredFilters)
+		{
+			_appliedFilters = desiredFilters;
+			filters = desiredFilters;
+		}
 	}
 
 	function updateElapsed():Void
@@ -965,17 +1067,52 @@ class FlxGame extends Sprite
 	function draw():Void
 	{
 		if (!_state.visible || !_state.exists)
+		{
+			_drawValid = false;
 			return;
+		}
 
 		if (drawWrapper != null)
 		{
-			// Use the wrapper (e.g. RenderThread.submitRender)
+			// Use the wrapper (e.g. RenderThread.submitRender). A wrapper may defer
+			// or offload the work, so the canvases cannot be trusted afterwards.
+			_drawValid = false;
 			drawWrapper(doDraw);
 		}
 		else
 		{
 			doDraw();
+			_drawValid = true;
+			_drawCameraCount = FlxG.cameras.list.length;
 		}
+	}
+
+	/**
+	 * Whether this `ENTER_FRAME` tick can present the previous image without
+	 * rebuilding the draw list.
+	 *
+	 * Only separate-update mode with a fixed timestep can produce ticks that ran no
+	 * logic step, and such a tick cannot have changed the world: the graphics
+	 * commands recorded on the camera canvases still describe it exactly, and OpenFL
+	 * re-renders them as part of the display list anyway. Ticks that did run a step,
+	 * and anything that invalidated the canvases (resize, state switch, camera
+	 * added or removed, `invalidateDrawCache()`) fall back to a full draw.
+	 */
+	inline function canSkipDraw(steps:Int):Bool
+	{
+		if (!_separateUpdateDraw || steps > 0 || !_drawValid)
+			return false;
+
+		return _drawCameraCount == FlxG.cameras.list.length
+			&& drawWrapper == null
+			&& FlxG.separateDrawSkipIdleFrames
+			&& FlxG.renderTile
+			&& _state != null
+			&& _state.visible
+			&& _state.exists
+			#if FLX_DEBUG
+			&& !FlxG.debugger.visible
+			#end;
 	}
 
 	/**
