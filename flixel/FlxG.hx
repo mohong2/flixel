@@ -78,17 +78,46 @@ class FlxG
 	public static var fixedTimestep:Bool = true;
 
 	/**
-	 * Separates game updates from rendering so they run at independent rates.
+	 * Separates game logic from rendering so they run at independent rates.
 	 *
-	 * - **Updates** (physics, animations, input) run on a `haxe.Timer` at `updateFramerate`.
-	 * - **Rendering** runs at `drawFramerate` via `ENTER_FRAME`.
+	 * - **Logic** runs at `updateFramerate` through the fixed-timestep accumulator,
+	 *   exactly as in combined mode.
+	 * - **Rendering** happens on every `ENTER_FRAME`, i.e. at `drawFramerate`.
 	 *
-	 * On a 144 Hz monitor you can set `updateFramerate = 60`, `drawFramerate = 144`
-	 * for butter-smooth visuals without breaking physics or animation speed.
+	 * On a 144 Hz monitor set `updateFramerate = 60`, `drawFramerate = 144` to
+	 * present at display rate without running game logic 2.4x as often. Ticks that
+	 * ran no logic step reuse the draw commands already recorded on the camera
+	 * canvases (see `separateDrawSkipIdleFrames`) instead of rebuilding them, so
+	 * the extra display frames are close to free CPU-wise.
 	 *
-	 * Requires `fixedTimestep = true` (the default).
+	 * Assigning this keeps `FlxGame.separateUpdateDraw` in sync in both directions.
+	 *
+	 * `fixedTimestep = true` (the default) is required for a logic rate that is
+	 * independent of the display refresh rate.
 	 */
-	public static var separateUpdateDraw:Bool = false;
+	public static var separateUpdateDraw(get, set):Bool;
+
+	/**
+	 * Backing field for `separateUpdateDraw`.
+	 */
+	static var _separateUpdateDraw:Bool = false;
+
+	/**
+	 * Only consulted while `separateUpdateDraw` is `true`: on `ENTER_FRAME` ticks
+	 * that ran no logic step, present the graphics commands that are already
+	 * recorded on the camera canvases instead of running `FlxState.draw()` and the
+	 * camera lock/unlock again. Those commands describe the unchanged world exactly,
+	 * so the presented image is identical; the rebuild is simply redundant work on
+	 * the extra display frames that a draw rate above the update rate produces.
+	 *
+	 * **Defaults to `false`**: skipping the rebuild means `FlxG.plugins.draw()`
+	 * and `FlxState.draw()` (including per-sprite `draw()` overrides) do not run on
+	 * those ticks, so it needs broader regression evidence on real projects before
+	 * it can be enabled for everyone. `preDraw`/`postDraw` are still dispatched.
+	 *
+	 * Only used with `FlxG.renderTile` and no `drawWrapper` set.
+	 */
+	public static var separateDrawSkipIdleFrames:Bool = false;
 
 	/**
 	 * How fast or slow time should pass in the game; default is `1.0`.
@@ -725,6 +754,27 @@ class FlxG
 	}
 	#end
 
+	static function get_separateUpdateDraw():Bool
+	{
+		return _separateUpdateDraw;
+	}
+
+	static function set_separateUpdateDraw(value:Bool):Bool
+	{
+		if (_separateUpdateDraw == value)
+			return value;
+
+		_separateUpdateDraw = value;
+
+		// Keep FlxGame in sync; its setter also recomputes the catch-up cap, which
+		// depends on the mode. No recursion: FlxGame sets its own backing field
+		// before assigning here, so its setter early-returns in that direction.
+		if (game != null && game._separateUpdateDraw != value)
+			game.separateUpdateDraw = value;
+
+		return value;
+	}
+
 	static function set_updateFramerate(Framerate:Int):Int
 	{
 		if (!separateUpdateDraw && Framerate < drawFramerate)
@@ -735,13 +785,9 @@ class FlxG
 		game._stepMS = Math.abs(1000 / Framerate);
 		game._stepSeconds = game._stepMS / 1000;
 
-		if (game._maxAccumulation < game._stepMS)
-			game._maxAccumulation = game._stepMS;
-
-		// Keep the catch-up cap tied to the update rate, with a 250ms floor so
-		// brief hitches fully catch up instead of dropping game time.
-		if (separateUpdateDraw && game != null)
-			game._maxAccumulation = Math.max(2000 / Framerate, 250);
+		// The catch-up cap is derived from the mode and the (possibly new) rates.
+		if (game != null)
+			game.updateMaxAccumulation();
 
 		return Framerate;
 	}
@@ -756,15 +802,10 @@ class FlxG
 		if (game.stage != null)
 			game.stage.frameRate = drawFramerate;
 
-		// Separate mode catches up at update rate; combined mode at draw rate.
-		// Floors prevent brief hitches from dropping time the audio already advanced.
-		if (separateUpdateDraw)
-			game._maxAccumulation = Math.max(2000 / updateFramerate, 250);
-		else
-			game._maxAccumulation = Math.max(2000 / drawFramerate - 1, 100);
-
-		if (game._maxAccumulation < game._stepMS)
-			game._maxAccumulation = game._stepMS;
+		// The catch-up cap depends on the mode (separate mode derives it from the
+		// update rate, combined mode from the draw rate) and on the new draw rate.
+		if (game != null)
+			game.updateMaxAccumulation();
 
 		return Framerate;
 	}
