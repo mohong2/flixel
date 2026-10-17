@@ -176,6 +176,18 @@ class FlxText extends FlxSprite
 
 	var _hasBorderAlpha = false;
 
+	/**
+	 * Scratch bitmap for the border pass: the border-coloured text is rasterized into it once and
+	 * then blitted at every border offset, so one rebuild runs the TextField layout and glyph
+	 * rasterization twice instead of `1 + 8 * iterations` times. Kept between rebuilds
+	 * (disposed in destroy()).
+	 */
+	var _textCache:BitmapData;
+
+	/** Device-space border stamp offsets for the current style/border/scale; rebuilt when those change. */
+	var _borderOffsets:Array<Float>;
+	var _borderOffsetsKey:String = "";
+
 	#if flash
 	/**
 	 * Helper to draw line by line used at `drawTextFieldTo()`.
@@ -237,6 +249,11 @@ class FlxText extends FlxSprite
 	 */
 	override public function destroy():Void
 	{
+		if (_textCache != null)
+		{
+			_textCache.dispose();
+			_textCache = null;
+		}
 		textField = null;
 		_font = null;
 		_defaultFormat = null;
@@ -889,18 +906,7 @@ class FlxText extends FlxSprite
 
 		if (textField != null && textField.text != null && textField.text.length > 0)
 		{
-			// Now that we've cleared a buffer, we need to actually render the text to it
-			copyTextFormat(_defaultFormat, _formatAdjusted);
-
-			_matrix.identity();
-			if (_textRenderScale != 1)
-				_matrix.scale(_textRenderScale, _textRenderScale);
-
-			applyBorderStyle();
-			applyBorderTransparency();
-			applyFormats(_formatAdjusted, false);
-
-			drawTextFieldTo(graphic.bitmap);
+			renderText();
 		}
 
 		_regen = false;
@@ -1013,6 +1019,175 @@ class FlxText extends FlxSprite
 
 		regenGraphic();
 		super.calcFrame(RunOnCpp);
+	}
+
+	/** Allocation-reusing, cleared scratch bitmap for the border pass. */
+	function ensureTextCache():BitmapData
+	{
+		var w:Int = graphic.bitmap.width;
+		var h:Int = graphic.bitmap.height;
+		// Grow-only: auto-sized texts change their bitmap size on almost every rebuild, and
+		// re-allocating the scratch bitmap there costs more than the extra transparent blit area.
+		if (_textCache == null)
+		{
+			_textCache = new BitmapData(w, h, true, FlxColor.TRANSPARENT);
+		}
+		else if (_textCache.width < w || _textCache.height < h)
+		{
+			var nw:Int = Std.int(Math.max(w, _textCache.width));
+			var nh:Int = Std.int(Math.max(h, _textCache.height));
+			_textCache.dispose();
+			_textCache = new BitmapData(nw, nh, true, FlxColor.TRANSPARENT);
+		}
+		else
+		{
+			_textCache.fillRect(_textCache.rect, FlxColor.TRANSPARENT);
+		}
+		return _textCache;
+	}
+
+	inline static function pushRingOffset(out:Array<Float>, c:Float):Void
+	{
+		out.push(-c);
+		out.push(-c);
+		out.push(0);
+		out.push(-c);
+		out.push(c);
+		out.push(-c);
+		out.push(c);
+		out.push(0);
+		out.push(c);
+		out.push(c);
+		out.push(0);
+		out.push(c);
+		out.push(-c);
+		out.push(c);
+		out.push(-c);
+		out.push(0);
+	}
+
+	/**
+	 * Device-space border stamp offsets, in exactly the order the historical border loop produced
+	 * them (see `applyBorderStyle`), cached because they only change with style/size/quality/scale.
+	 */
+	function borderOffsetsFor(s:Float):Array<Float>
+	{
+		var key:String = '#' + borderStyle + '_' + borderSize + '_' + borderQuality + '_' + s;
+		if (_borderOffsetsKey == key && _borderOffsets != null)
+			return _borderOffsets;
+
+		var iterations:Int = Std.int(borderSize * borderQuality);
+		if (iterations <= 0)
+			iterations = 1;
+		var delta:Float = borderSize / iterations;
+		var out:Array<Float> = [];
+		var c:Float;
+		switch (borderStyle)
+		{
+			case SHADOW:
+				for (i in 0...iterations)
+				{
+					c = delta * (i + 1) * s;
+					out.push(c);
+					out.push(c);
+				}
+			case OUTLINE:
+				for (i in 0...iterations)
+				{
+					c = delta * (i + 1) * s;
+					pushRingOffset(out, c);
+				}
+			case OUTLINE_FAST:
+				for (i in 0...iterations)
+				{
+					c = delta * (i + 1) * s;
+					out.push(-c);
+					out.push(-c);
+					out.push(c);
+					out.push(-c);
+					out.push(c);
+					out.push(c);
+					out.push(-c);
+					out.push(c);
+				}
+			case NONE:
+		}
+		_borderOffsets = out;
+		_borderOffsetsKey = key;
+		return out;
+	}
+
+	/**
+	 * Renders the current text, with its border style, into `graphic.bitmap`.
+	 *
+	 * The historical implementation drew the TextField itself once per border offset
+	 * (`1 + 8 * iterations` draws - 17 for the HUD's `borderSize = 2`), and every one of those
+	 * draws goes through the whole TextField path: layout bookkeeping, a fresh renderer for the
+	 * target bitmap, glyph submission. Only the first draw of each colour actually rasterizes
+	 * glyphs; the rest are pure blits. So the border is rasterized once into a scratch bitmap and
+	 * stamped from there with plain bitmap blits at the very same offsets - pixel-identical output,
+	 * but the expensive part now runs twice per rebuild instead of 17 times.
+	 *
+	 * Transparent border colours keep the historical path: they accumulate the stamps and then
+	 * multiply their alpha in one pass, which needs the individual TextField draws.
+	 */
+	function renderText():Void
+	{
+		copyTextFormat(_defaultFormat, _formatAdjusted);
+
+		var s:Float = _textRenderScale;
+		if (borderStyle == NONE || _hasBorderAlpha)
+		{
+			renderTextHistorical();
+			return;
+		}
+
+		var bd:BitmapData = graphic.bitmap;
+		var cache:BitmapData = ensureTextCache();
+
+		// 1) rasterize the border-coloured text once
+		applyFormats(_formatAdjusted, true);
+		_matrix.identity();
+		if (s != 1)
+			_matrix.scale(s, s);
+		cache.draw(textField, _matrix);
+
+		// 2) the border itself: plain bitmap blits at the offsets the old loop used
+		var offsets:Array<Float> = borderOffsetsFor(s);
+		var m:openfl.geom.Matrix = _matrix;
+		var i:Int = 0;
+		while (i < offsets.length)
+		{
+			m.identity();
+			m.translate(offsets[i], offsets[i + 1]);
+			bd.draw(cache, m);
+			i += 2;
+		}
+
+		// 3) the fill-coloured text on top, exactly like the last pass of the old loop
+		applyFormats(_formatAdjusted, false);
+		m.identity();
+		if (s != 1)
+			m.scale(s, s);
+		if (borderStyle == SHADOW)
+			m.translate(-shadowOffset.x * borderSize, -shadowOffset.y * borderSize);
+		drawTextFieldTo(bd);
+	}
+
+	/** The pre-existing render pass, kept for transparent borders and as the benchmark baseline. */
+	function renderTextHistorical():Void
+	{
+		copyTextFormat(_defaultFormat, _formatAdjusted);
+
+		_matrix.identity();
+		if (_textRenderScale != 1)
+			_matrix.scale(_textRenderScale, _textRenderScale);
+
+		applyBorderStyle();
+		applyBorderTransparency();
+		applyFormats(_formatAdjusted, false);
+
+		drawTextFieldTo(graphic.bitmap);
 	}
 
 	function applyBorderStyle():Void
