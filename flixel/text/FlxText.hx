@@ -97,6 +97,21 @@ class FlxText extends FlxSprite
 	public var borderStyle(default, set):FlxTextBorderStyle = NONE;
 
 	/**
+	 * Upper bound for this text's rasterization scale (see `getTextRenderScale`). `0` keeps the
+	 * automatic scale, i.e. the historical behaviour.
+	 *
+	 * Why: the bitmap is re-rendered whenever the text changes, and the cost grows with the
+	 * *square* of the rasterization scale (every glyph pass, including each border offset, is
+	 * repeated into a bigger bitmap). At a 1.5x window scale a HUD line costs 2.25x more than at
+	 * 1x; at a 3x mobile scale it costs 9x. For HUD lines that are rebuilt on every note hit
+	 * (score / accuracy / ms readout / stat counters) capping this to 1 keeps the update at the
+	 * game's own resolution - the resolution the rest of the world is drawn at anyway - and is the
+	 * difference between a visible hitch and no hitch at all.
+	 */
+	public var renderScaleCap:Float = 0;
+
+
+	/**
 	 * The color of the border in `0xAARRGGBB` format
 	 */
 	public var borderColor(default, set):FlxColor = FlxColor.TRANSPARENT;
@@ -798,6 +813,8 @@ class FlxText extends FlxSprite
 			result = 1;
 		if (result > 4)
 			result = 4;
+		if (renderScaleCap > 0 && result > renderScaleCap)
+			result = renderScaleCap;
 
 		return result;
 	}
