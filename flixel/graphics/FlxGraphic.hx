@@ -1,6 +1,7 @@
 package flixel.graphics;
 
 import flash.display.BitmapData;
+import flash.geom.Rectangle;
 import flixel.FlxG;
 import flixel.graphics.frames.FlxAtlasFrames;
 import flixel.graphics.frames.FlxFrame;
@@ -326,6 +327,30 @@ class FlxGraphic implements IFlxDestroyable
 	public var isDumped(default, null):Bool = false;
 
 	/**
+		Rect of the original atlas that the current (cropped) bitmap represents.
+		Set only by the lossless runtime atlas cropper; null for every other graphic.
+	**/
+	public var gfxCropRect:Rectangle;
+
+	/** Original source key used to rebuild the cropped CPU buffer on restore. */
+	public var gfxCropSource:String;
+
+	/**
+	 * L2b restore plan (backend.gfx.GfxAtlasRepack.GfxRepackPlan). Dynamic here
+	 * keeps the flixel fork independent of the engine's backend package.
+	**/
+	public var gfxRepackPlan:Dynamic;
+
+	/**
+		L1b palette restore plan (backend.gfx.GfxPalette.GfxPalettePlan). Dynamic
+		keeps the flixel fork independent of the engine's backend package.
+	**/
+	public var gfxPalettePlan:Dynamic;
+
+	/** 256x1 RGBA palette texture owned by this graphic; disposed in destroy(). */
+	public var gfxPaletteBitmap:BitmapData;
+
+	/**
 	 * Whether the `BitmapData` of this graphic object can be dumped for decreased memory usage,
 	 * but may cause some issues (when you need direct access to pixels of this graphic.
 	 * If the graphic is dumped then you should call `undump()` and have total access to pixels.
@@ -334,6 +359,12 @@ class FlxGraphic implements IFlxDestroyable
 
 	#if FLX_DRAW_QUADS
 	public var shader(default, null):FlxShader;
+
+	/** Replace the per-graphic batch shader (L1b palette). Keeps batching intact. */
+	public function setGfxShader(value:FlxShader):Void
+	{
+		shader = value;
+	}
 	#else
 
 	/**
@@ -395,6 +426,8 @@ class FlxGraphic implements IFlxDestroyable
 	var _useCount:Int = 0;
 
 	var _destroyOnNoUse:Bool = true;
+
+	var _destroyed:Bool = false;
 
 	/**
 	 * `FlxGraphic` constructor
@@ -474,11 +507,73 @@ class FlxGraphic implements IFlxDestroyable
 	}
 
 	/**
+	 * Whether the CPU-side pixel buffer has been released while the GPU texture
+	 * is kept. Reading this never triggers a re-decode.
+	 */
+	public var cpuReleased(get, never):Bool;
+
+	/**
+	 * Whether the CPU-side pixels are currently resident. Reading this never
+	 * triggers a re-decode.
+	 */
+	public var hasCPU(get, never):Bool;
+
+	/**
+	 * Releases the CPU pixel buffer after the bitmap has been uploaded to the
+	 * current render context. The GPU texture stays alive, and a later pixel
+	 * access is re-decoded through the callback installed by the engine.
+	 *
+	 * This is deliberately a no-op when no reload callback exists: generated
+	 * graphics (text canvases, white pixels, ...) are never made unreadable.
+	 */
+	public function dropCPU():Bool
+	{
+		return bitmap != null && bitmap.dropCPU();
+	}
+
+	/**
+	 * Restores the CPU pixel buffer on demand.
+	 */
+	public function restoreCPU():Bool
+	{
+		return bitmap != null && bitmap.restoreCPU();
+	}
+
+	inline function get_cpuReleased():Bool
+	{
+		return bitmap != null && bitmap.cpuReleased;
+	}
+
+	inline function get_hasCPU():Bool
+	{
+		return bitmap != null && bitmap.hasCPU;
+	}
+
+	/**
 	 * Trying to free the memory as much as possible
 	 */
 	public function destroy():Void
 	{
+		// Double destroy used to reach BitmapData twice (once from the cache and
+		// once from a stale evictor). Everything after the first call is a no-op.
+		if (_destroyed) return;
+
+		// A live sprite still holds this graphic. Destroying it would leave that
+		// sprite pointing at a dead native bitmap, which is exactly the class of
+		// use-after-free the old LRU evictor produced. The cache may drop its own
+		// reference; the graphic dies when the last user releases it.
+		if (_useCount > 0) return;
+		_destroyed = true;
+
+		if (bitmap != null) bitmap.setCPURestore(null);
 		bitmap = FlxDestroyUtil.dispose(bitmap);
+
+		if (gfxPaletteBitmap != null)
+		{
+			gfxPaletteBitmap.dispose();
+			gfxPaletteBitmap = null;
+		}
+		gfxPalettePlan = null;
 
 		#if FLX_DRAW_QUADS
 		shader = null;
@@ -611,10 +706,13 @@ class FlxGraphic implements IFlxDestroyable
 
 	function set_useCount(Value:Int):Int
 	{
+		// Store the new count BEFORE removing from the cache: destroy() refuses
+		// to touch a graphic whose useCount is still positive.
+		_useCount = Value;
 		if (Value <= 0 && _destroyOnNoUse && !persist)
 			FlxG.bitmap.remove(this);
 
-		return _useCount = Value;
+		return Value;
 	}
 
 	function get_destroyOnNoUse():Bool
@@ -645,15 +743,24 @@ class FlxGraphic implements IFlxDestroyable
 
 	function set_bitmap(value:BitmapData):BitmapData
 	{
+		bitmap = value;
 		if (value != null)
 		{
-			bitmap = value;
-			width = bitmap.width;
-			height = bitmap.height;
+			width = value.width;
+			height = value.height;
+			// A bitmap swap invalidates the cached full-image frame. Atlas frame
+			// collections are updated separately by GfxAtlasCrop.
+			_imageFrame = null;
 			#if (!flash && !FLX_DRAW_QUADS)
 			if (FlxG.renderTile && _tilesheet != null)
-				_tilesheet = new Tilesheet(bitmap);
+				_tilesheet = new Tilesheet(value);
 			#end
+		}
+		else
+		{
+			width = 0;
+			height = 0;
+			_imageFrame = null;
 		}
 
 		return value;

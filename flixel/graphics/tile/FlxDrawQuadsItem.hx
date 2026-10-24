@@ -273,8 +273,20 @@ class FlxDrawQuadsItem extends FlxDrawBaseItem<FlxDrawQuadsItem>
 			return;
 
 		var shader = shader != null ? shader : graphics.shader;
-		shader.bitmap.input = graphics.bitmap;
-		shader.bitmap.filter = (camera.antialiasing || antialiasing) ? LINEAR : NEAREST;
+		// A per-sprite custom shader cannot expand palette indices. Give it a
+		// plain RGBA copy of the bitmap so it keeps working byte-for-byte; the
+		// palette texture stays alive for every other sprite of this graphic.
+		var inputBitmap = graphics.bitmap;
+		var paletteIndex:Bool = inputBitmap != null && inputBitmap.paletteApplied;
+		if (paletteIndex && this.shader != null)
+		{
+			inputBitmap = inputBitmap.getRGBAFallback();
+			paletteIndex = inputBitmap != null && inputBitmap.paletteApplied;
+		}
+		shader.bitmap.input = inputBitmap;
+		// Palette indices must never be interpolated: a filtered index is a
+		// different palette entry, not a blend of two colours.
+		shader.bitmap.filter = (!paletteIndex && (camera.antialiasing || antialiasing)) ? LINEAR : NEAREST;
 
 		if (uniformAlpha)
 		{
