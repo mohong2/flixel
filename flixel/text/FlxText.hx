@@ -19,15 +19,14 @@ import flixel.util.FlxColor;
 import flixel.util.FlxDestroyUtil;
 import flixel.util.helpers.FlxRange;
 import openfl.Assets;
+import openfl.geom.Rectangle;
 
 using flixel.util.FlxStringUtil;
 using flixel.util.FlxUnicodeUtil;
 
-#if flash
-import openfl.geom.Rectangle;
-#end
 #if (openfl >= "8.0.0")
 import openfl.utils.AssetType;
+import openfl.utils.ByteArray;
 #end
 
 // TODO: think about filters and text
@@ -42,6 +41,9 @@ class FlxText extends FlxSprite
 	 * 2px gutter on both top and bottom
 	 */
 	static inline var VERTICAL_GUTTER:Int = 4;
+
+	/** Transparent margin around the glyph box in the border scratch bitmap, in device pixels. */
+	static inline var TEXT_PAD:Int = 2;
 
 	/**
 	 * The text being displayed.
@@ -187,6 +189,44 @@ class FlxText extends FlxSprite
 	/** Device-space border stamp offsets for the current style/border/scale; rebuilt when those change. */
 	var _borderOffsets:Array<Float>;
 	var _borderOffsetsKey:String = "";
+
+	/**
+	 * What the pixels in the bitmap currently show, for incremental rebuilds (C-2).
+	 *
+	 * A rebuild that only replaces one run of characters does not have to repaint the whole line:
+	 * the glyphs before and after the run stay exactly where they were, so their pixels are still
+	 * correct. The draws are then clipped to the run (see computeDirtyRect()), which is only legal
+	 * while every one of these inputs is unchanged - they are what the old pixels were built from.
+	 */
+	var _rasterText:String;
+	var _rasterTextW:Float = 0;
+	var _rasterScale:Float = -1;
+	var _rasterBorderKey:String = "";
+	var _rasterFont:String;
+	var _rasterAlign:String;
+	var _rasterSize:Null<Int>;
+	var _rasterColor:Null<Int>;
+	var _rasterLeading:Null<Int>;
+	var _rasterBorderColor:FlxColor = 0;
+	var _rasterBorderSize:Float = -1;
+	var _rasterBorderQuality:Float = -1;
+	var _rasterBorderStyle:FlxTextBorderStyle = FlxTextBorderStyle.NONE;
+	var _rasterAlignment:FlxTextAlign = FlxTextAlign.LEFT;
+	var _rasterFieldW:Float = -1;
+
+	/** Reused storage for the rectangle an incremental rebuild repaints. */
+	var _dirtyRect:Rectangle = new Rectangle();
+
+	#if hudtext_profile
+	/** Scratch bitmap for the HUDTEXT_VERIFY self-check (incremental rebuild vs full redraw). */
+	var _verifyBitmap:BitmapData;
+	var __verifyLogs:Int = 0;
+	var _dbgX0:Float = 0;
+	var _dbgX1:Float = 0;
+	var _dbgTW:Float = 0;
+	var _dbgOX:Float = 0;
+	var _dbgAlign:String = "";
+	#end
 
 	#if flash
 	/**
@@ -851,6 +891,10 @@ class FlxText extends FlxSprite
 		if (!_regen)
 			return;
 
+		#if hudtext_profile
+		HudTextProf.begin(textField.width, (textField.text == null) ? 0 : textField.text.length);
+		#end
+
 		var oldWidth:Int = 0;
 		var oldHeight:Int = VERTICAL_GUTTER;
 
@@ -864,6 +908,11 @@ class FlxText extends FlxSprite
 		// Account for gutter
 		var newHeight:Float = textField.textHeight + VERTICAL_GUTTER;
 
+		#if hudtext_profile
+		HudTextProf.mark(1);
+		HudTextProf.meta(textField.textWidth, _textRenderScale);
+		#end
+
 		// prevent text height from shrinking on flash if text == ""
 		if (textField.textHeight == 0)
 		{
@@ -873,7 +922,9 @@ class FlxText extends FlxSprite
 		var pixelWidth:Int = Std.int(Math.max(1, newWidth * _textRenderScale));
 		var pixelHeight:Int = Std.int(Math.max(1, newHeight * _textRenderScale));
 
-		if (oldWidth != pixelWidth || oldHeight != pixelHeight)
+		var realloc:Bool = (oldWidth != pixelWidth || oldHeight != pixelHeight);
+
+		if (realloc)
 		{
 			// Need to generate a new buffer to store the text graphic.
 			// Bitmap pixels use the render scale; logical width/height stay unchanged.
@@ -892,7 +943,17 @@ class FlxText extends FlxSprite
 			_flashRect.width = pixelWidth;
 			_flashRect.height = pixelHeight;
 		}
-		else // Else just clear the old buffer before redrawing the text
+
+		// C-2: the rectangle that actually has to be repainted (null = the whole bitmap)
+		#if hudtext_profile
+		var __td:Float = HudTextProf.stamp();
+		#end
+		var dirty:Rectangle = computeDirtyRect(realloc, pixelWidth, pixelHeight);
+		#if hudtext_profile
+		HudTextProf.noteExtra(5, __td);
+		#end
+
+		if (dirty == null)
 		{
 			graphic.bitmap.fillRect(_flashRect, FlxColor.TRANSPARENT);
 			if (_hasBorderAlpha)
@@ -903,20 +964,43 @@ class FlxText extends FlxSprite
 					_borderPixels.fillRect(_flashRect, FlxColor.TRANSPARENT);
 			}
 		}
+		else
+		{
+			// Incremental rebuild: only the changed run is cleared, everything else keeps its pixels
+			// (and is not drawn over again, which is why the draws below are clipped to the same box).
+			graphic.bitmap.fillRect(dirty, FlxColor.TRANSPARENT);
+			if (_hasBorderAlpha)
+				_borderPixels.fillRect(dirty, FlxColor.TRANSPARENT);
+		}
+
+		#if hudtext_profile
+		HudTextProf.mark(2);
+		HudTextProf.noteDirty((dirty == null) ? 0 : dirty.width, dirty == null);
+		#end
 
 		if (textField != null && textField.text != null && textField.text.length > 0)
 		{
-			renderText();
+			renderText(dirty);
 		}
+
+		#if hudtext_profile
+		if (dirty != null && HudTextProf.verify)
+			verifyDirtyRaster();
+		#end
 
 		_regen = false;
 		resetFrame();
+		rememberRaster();
+
+		#if hudtext_profile
+		HudTextProf.end();
+		#end
 	}
 
 	/**
 	 * Internal function to draw textField to a BitmapData, if flash it calculates every line x to avoid blurry lines.
 	 */
-	function drawTextFieldTo(graphic:BitmapData):Void
+	function drawTextFieldTo(graphic:BitmapData, clip:Rectangle = null):Void
 	{
 		#if flash
 		if (alignment == FlxTextAlign.CENTER && isTextBlurry())
@@ -945,7 +1029,7 @@ class FlxText extends FlxSprite
 		}
 		#end
 
-		graphic.draw(textField, _matrix);
+		graphic.draw(textField, _matrix, null, null, clip, false);
 	}
 
 	#if flash
@@ -968,6 +1052,9 @@ class FlxText extends FlxSprite
 
 	override public function draw():Void
 	{
+		#if hudtext_profile
+		HudTextProf.tick();
+		#end
 		regenGraphic();
 
 		// Draw the high-res bitmap in logical coordinates with an equivalent origin.
@@ -1021,11 +1108,14 @@ class FlxText extends FlxSprite
 		super.calcFrame(RunOnCpp);
 	}
 
-	/** Allocation-reusing, cleared scratch bitmap for the border pass. */
-	function ensureTextCache():BitmapData
+	/**
+	 * Allocation-reusing, cleared scratch bitmap for the border pass.
+	 *
+	 * C-0 sizes it to the glyph bounding box instead of the full text bitmap: the scratch is
+	 * internal and cleared every rebuild, so a smaller one only removes transparent border area.
+	 */
+	function ensureTextCache(w:Int, h:Int):BitmapData
 	{
-		var w:Int = graphic.bitmap.width;
-		var h:Int = graphic.bitmap.height;
 		// Grow-only: auto-sized texts change their bitmap size on almost every rebuild, and
 		// re-allocating the scratch bitmap there costs more than the extra transparent blit area.
 		if (_textCache == null)
@@ -1045,6 +1135,240 @@ class FlxText extends FlxSprite
 		}
 		return _textCache;
 	}
+
+	/** Records what the bitmap now shows, so the next rebuild can tell what it may keep. */
+	function rememberRaster():Void
+	{
+		var f:TextFormat = _defaultFormat;
+		_rasterText = textField.text;
+		_rasterTextW = textField.textWidth;
+		_rasterScale = _textRenderScale;
+		_rasterBorderKey = _borderOffsetsKey;
+		_rasterFont = Std.string(f.font);
+		_rasterAlign = Std.string(f.align);
+		_rasterSize = f.size;
+		_rasterColor = f.color;
+		_rasterLeading = f.leading;
+		_rasterBorderColor = borderColor;
+		_rasterBorderSize = borderSize;
+		_rasterBorderQuality = borderQuality;
+		_rasterBorderStyle = borderStyle;
+		_rasterAlignment = alignment;
+		_rasterFieldW = textField.width;
+	}
+
+	/**
+	 * The device-pixel rectangle an incremental rebuild has to repaint, or null when the whole
+	 * bitmap has to be redrawn.
+	 *
+	 * A rebuild can keep the previous pixels when nothing but a value inside the line changed:
+	 * the bitmap was not re-allocated, the render scale / font / colours / alignment / border
+	 * geometry are the same as last time, the line still has exactly the same width (so the
+	 * centred line did not move and the unchanged parts are still at the same x) and the string
+	 * differs over one contiguous run of characters only. The rebuilt box then has to cover that
+	 * run plus the border's reach, because the untouched glyphs keep their pixels and are simply
+	 * not drawn again. Everything else in the bitmap is still valid, so the caller clips the
+	 * draws to this rectangle and no pixel outside it is touched.
+	 *
+	 * It returns null - a full redraw, which is always correct - for every case it cannot prove:
+	 * a transparent border colour, a style that draws outside the ring, a width change, an empty
+	 * or very different string, and a change that would repaint most of the line anyway.
+	 */
+	function computeDirtyRect(realloc:Bool, pixelWidth:Int, pixelHeight:Int):Rectangle
+	{
+		if (realloc) return null;
+		if (_hasBorderAlpha || (borderStyle != OUTLINE && borderStyle != OUTLINE_FAST)) return null;
+
+		var text:String = textField.text;
+		if (text == null || text.length == 0 || _rasterText == null) return null;
+		if (Math.abs(_textRenderScale - _rasterScale) > 0.001) return null;
+
+		var f:TextFormat = _defaultFormat;
+		if (_rasterFont != Std.string(f.font) || _rasterAlign != Std.string(f.align)) return null;
+		if (_rasterSize != f.size || _rasterColor != f.color || _rasterLeading != f.leading) return null;
+		if (_rasterBorderColor != borderColor || _rasterBorderSize != borderSize || _rasterBorderQuality != borderQuality) return null;
+		if (_rasterBorderStyle != borderStyle || _rasterAlignment != alignment) return null;
+		if (_rasterFieldW != textField.width) return null;
+
+		// the stamp offsets have to be the ones the previous rebuild used
+		borderOffsetsFor(_textRenderScale);
+		if (_rasterBorderKey != _borderOffsetsKey) return null;
+
+		var textW:Float = textField.textWidth;
+		if (Math.abs(textW - _rasterTextW) > 0.01) return null;
+
+		// the changed run: [pre, runEnd) in the new string
+		var oldText:String = _rasterText;
+		var oldLen:Int = oldText.length;
+		var newLen:Int = text.length;
+		var pre:Int = 0;
+		while (pre < oldLen && pre < newLen && oldText.charCodeAt(pre) == text.charCodeAt(pre))
+			pre++;
+		if (pre >= newLen && pre >= oldLen) return null; // identical: a full pass is the safe answer
+		var suf:Int = 0;
+		while (suf < oldLen - pre && suf < newLen - pre
+			&& oldText.charCodeAt(oldLen - 1 - suf) == text.charCodeAt(newLen - 1 - suf))
+			suf++;
+		var runEnd:Int = newLen - suf;
+		if (runEnd < pre) runEnd = pre;
+
+		var x0:Float = charX(pre, newLen);
+		var x1:Float = charX(runEnd, newLen);
+		if (x0 < 0 || x1 < 0 || x1 < x0) return null;
+
+		// x0/x1 are TextField-local, and the text is painted at device x = local * s (the centring is
+		// already part of the local coordinates), so the box needs no further offset - only the
+		// border's reach, which is drawn up to borderSize * s pixels outside the glyphs.
+		var s:Float = _textRenderScale;
+		var reach:Int = Std.int(Math.ceil(borderSize * s)) + 2 + Std.int(Math.ceil(2 * s));
+		#if hudtext_profile
+		_dbgX0 = x0;
+		_dbgX1 = x1;
+		_dbgTW = textW;
+		_dbgOX = oxFor(textW);
+		_dbgAlign = Std.string(_defaultFormat.align);
+		#end
+		var dx0:Int = Std.int(Math.floor(x0 * s)) - reach;
+		var dx1:Int = Std.int(Math.ceil(x1 * s)) + reach;
+		if (dx0 < 0) dx0 = 0;
+		if (dx1 > pixelWidth) dx1 = pixelWidth;
+		if (dx1 <= dx0) return null;
+		// repainting most of the line is not worth the bookkeeping (and would need its own proof)
+		if ((dx1 - dx0) * 2 > pixelWidth) return null;
+
+		_dirtyRect.setTo(dx0, 0, dx1 - dx0, pixelHeight);
+		return _dirtyRect;
+	}
+
+	/** Left edge of the text inside the TextField (the alignment's own offset), in TextField units. */
+	function oxFor(textW:Float):Float
+	{
+		if (alignment == FlxTextAlign.CENTER)
+			return (textField.width - textW) * 0.5;
+		if (alignment == FlxTextAlign.RIGHT)
+			return textField.width - textW;
+		return 0;
+	}
+
+	/**
+	 * TextField-local x of a character boundary, -1 when it cannot be resolved.
+	 *
+	 * The end of the string uses the last character's box instead of textField.textWidth: the
+	 * reported width is the advance sum, and the last glyph's box (and its border) can reach past
+	 * it - which is exactly the case HUDTEXT_VERIFY caught as a missing column of border pixels.
+	 */
+	function charX(i:Int, len:Int):Float
+	{
+		if (i <= 0) return 0;
+		if (i >= len)
+		{
+			var last:Rectangle = textField.getCharBoundaries(len - 1);
+			if (last == null) return -1;
+			return last.x + last.width;
+		}
+		var r:Rectangle = textField.getCharBoundaries(i);
+		return (r == null) ? -1 : r.x;
+	}
+
+	#if hudtext_profile
+	/**
+	 * HUDTEXT_VERIFY: repaint the same text fully into a scratch bitmap and compare it with the
+	 * incrementally rebuilt one. Any differing pixel means the rebuilt box missed something, so
+	 * this is the evidence that clipping the draws leaves the bitmap bit-identical.
+	 */
+	function verifyDirtyRaster():Void
+	{
+		var bd:BitmapData = graphic.bitmap;
+		var w:Int = bd.width;
+		var h:Int = bd.height;
+		if (_verifyBitmap == null || _verifyBitmap.width != w || _verifyBitmap.height != h)
+		{
+			if (_verifyBitmap != null)
+				_verifyBitmap.dispose();
+			_verifyBitmap = new BitmapData(w, h, true, FlxColor.TRANSPARENT);
+		}
+		_verifyBitmap.fillRect(_verifyBitmap.rect, FlxColor.TRANSPARENT);
+		renderText(null, _verifyBitmap);
+
+		var rect:Rectangle = _verifyBitmap.rect;
+		var pa:ByteArray = bd.getPixels(rect);
+		var pb:ByteArray = _verifyBitmap.getPixels(rect);
+		pa.position = 0;
+		pb.position = 0;
+		var diffs:Int = 0;
+		var maxd:Int = 0;
+		var minX:Int = w;
+		var maxX:Int = -1;
+		var minY:Int = h;
+		var maxY:Int = -1;
+		var inkAMinX:Int = w;
+		var inkAMaxX:Int = -1;
+		var inkBMinX:Int = w;
+		var inkBMaxX:Int = -1;
+		var samples:StringBuf = new StringBuf();
+		for (i in 0...(w * h))
+		{
+			var a0:Int = pa.readUnsignedByte();
+			var a1:Int = pa.readUnsignedByte();
+			var a2:Int = pa.readUnsignedByte();
+			var aa:Int = pa.readUnsignedByte();
+			var b0:Int = pb.readUnsignedByte();
+			var b1:Int = pb.readUnsignedByte();
+			var b2:Int = pb.readUnsignedByte();
+			var ba:Int = pb.readUnsignedByte();
+			// getPixels() hands back ARGB32: the alpha channel is the first byte, not the last
+			var px:Int = i % w;
+			if (a0 > 0)
+			{
+				if (px < inkAMinX) inkAMinX = px;
+				if (px > inkAMaxX) inkAMaxX = px;
+			}
+			if (b0 > 0)
+			{
+				if (px < inkBMinX) inkBMinX = px;
+				if (px > inkBMaxX) inkBMaxX = px;
+			}
+			var d:Int = 0;
+			var v:Int = a0 - b0;
+			if (v < 0) v = -v;
+			d = v;
+			v = a1 - b1;
+			if (v < 0) v = -v;
+			if (v > d) d = v;
+			v = a2 - b2;
+			if (v < 0) v = -v;
+			if (v > d) d = v;
+			v = aa - ba;
+			if (v < 0) v = -v;
+			if (v > d) d = v;
+			if (d > 0)
+			{
+				diffs++;
+				var py:Int = Std.int(i / w);
+				if (px < minX) minX = px;
+				if (px > maxX) maxX = px;
+				if (py < minY) minY = py;
+				if (py > maxY) maxY = py;
+				if (diffs <= 3)
+				{
+					samples.add(' (' + px + ',' + py + ') A=' + a0 + '/' + a1 + '/' + a2 + '/' + aa + ' B=' + b0 + '/' + b1 + '/' + b2 + '/' + ba);
+				}
+			}
+			if (d > maxd) maxd = d;
+		}
+		if (diffs > 0 && __verifyLogs < 4)
+		{
+			__verifyLogs++;
+			HudTextProf.log('[verify] diff=' + diffs + ' box=' + minX + '..' + maxX + ' x ' + minY + '..' + maxY
+				+ ' dirty=' + _dirtyRect.x + '+' + _dirtyRect.width
+				+ ' x0=' + _dbgX0 + ' x1=' + _dbgX1 + ' tw=' + _dbgTW + ' ox=' + _dbgOX
+				+ ' fw=' + textField.width + ' s=' + _textRenderScale + ' align=' + _dbgAlign
+				+ ' inkA=' + inkAMinX + '..' + inkAMaxX + ' inkB=' + inkBMinX + '..' + inkBMaxX + samples.toString()
+				+ ' old="' + _rasterText + '" new="' + textField.text + '"');
+		}
+		HudTextProf.noteVerify(diffs, maxd);
+	}
+	#end
 
 	inline static function pushRingOffset(out:Array<Float>, c:Float):Void
 	{
@@ -1131,7 +1455,7 @@ class FlxText extends FlxSprite
 	 * Transparent border colours keep the historical path: they accumulate the stamps and then
 	 * multiply their alpha in one pass, which needs the individual TextField draws.
 	 */
-	function renderText():Void
+	function renderText(clip:Rectangle = null, target:BitmapData = null):Void
 	{
 		copyTextFormat(_defaultFormat, _formatAdjusted);
 
@@ -1142,15 +1466,100 @@ class FlxText extends FlxSprite
 			return;
 		}
 
-		var bd:BitmapData = graphic.bitmap;
-		var cache:BitmapData = ensureTextCache();
+		var bd:BitmapData = (target != null) ? target : graphic.bitmap;
 
-		// 1) rasterize the border-coloured text once
+		// C-0: rasterize and stamp only the glyph bounding box. The scratch bitmap is internal and
+		// cleared every rebuild, so sizing it to the text instead of the field-width bitmap cannot
+		// change a single output pixel - it only stops paying for the transparent area around the
+		// glyphs. The box is snapped to whole device pixels, so glyph rasterization stays identical.
+		var tw:Float = textField.textWidth;
+		var th:Float = textField.textHeight;
+		var ox:Float = 0;
+		if (alignment == FlxTextAlign.CENTER)
+			ox = (textField.width - tw) * 0.5;
+		else if (alignment == FlxTextAlign.RIGHT)
+			ox = textField.width - tw;
+		var pad:Int = TEXT_PAD;
+		var bx:Int = Std.int(Math.floor(ox * s)) - pad;
+		var by:Int = -pad;
+		var bw:Int = Std.int(Math.ceil(tw * s)) + pad * 2;
+		var bh:Int = Std.int(Math.ceil(th * s)) + pad * 2;
+		if (bw < 1)
+			bw = 1;
+		if (bh < 1)
+			bh = 1;
+		#if hudtext_profile
+		var __t0:Float = HudTextProf.stamp();
+		#end
+		var cache:BitmapData = ensureTextCache(bw, bh);
+		#if hudtext_profile
+		HudTextProf.noteExtra(0, __t0);
+		__t0 = HudTextProf.stamp();
+		#end
+
+		// Fast path: rasterize the text once, in the fill colour, and composite the border out of
+		// that raster's alpha (see FlxTextStamp). Only for a single border/fill colour - format
+		// ranges recolour part of the text, which one raster cannot express - and only for the ring
+		// styles; every other case keeps the BitmapData.draw path below, so the two paths have to
+		// stay equivalent (HUDTEXT_VERIFY compares them pixel by pixel).
+		if (FlxTextStamp.available && _formatRanges.length == 0
+			&& (borderStyle == OUTLINE || borderStyle == OUTLINE_FAST)
+			&& bd.getSurface() != null && cache.getSurface() != null)
+		{
+			applyFormats(_formatAdjusted, false);
+			#if hudtext_profile
+			HudTextProf.mark(3);
+			HudTextProf.noteExtra(1, __t0);
+			__t0 = HudTextProf.stamp();
+			#end
+
+			_matrix.identity();
+			_matrix.a = s;
+			_matrix.d = s;
+			_matrix.tx = -bx;
+			_matrix.ty = -by;
+			cache.draw(textField, _matrix);
+			#if hudtext_profile
+			HudTextProf.mark(4);
+			HudTextProf.noteExtra(2, __t0);
+			__t0 = HudTextProf.stamp();
+			#end
+
+			FlxTextStamp.begin(bd, cache, clip);
+			FlxTextStamp.border(borderOffsetsFor(s), bx, by, borderColor, 1);
+			#if hudtext_profile
+			HudTextProf.mark(5);
+			HudTextProf.noteExtra(4, __t0);
+			__t0 = HudTextProf.stamp();
+			#end
+
+			FlxTextStamp.fill(bx, by);
+			FlxTextStamp.end();
+			#if hudtext_profile
+			HudTextProf.mark(6);
+			HudTextProf.noteExtra(3, __t0);
+			#end
+			return;
+		}
+
+		// 1) rasterize the border-coloured text once, into the box-sized scratch bitmap
 		applyFormats(_formatAdjusted, true);
+		#if hudtext_profile
+		HudTextProf.mark(3);
+		HudTextProf.noteExtra(1, __t0);
+		__t0 = HudTextProf.stamp();
+		#end
 		_matrix.identity();
-		if (s != 1)
-			_matrix.scale(s, s);
+		_matrix.a = s;
+		_matrix.d = s;
+		_matrix.tx = -bx;
+		_matrix.ty = -by;
 		cache.draw(textField, _matrix);
+		#if hudtext_profile
+		HudTextProf.mark(4);
+		HudTextProf.noteExtra(2, __t0);
+		__t0 = HudTextProf.stamp();
+		#end
 
 		// 2) the border itself: plain bitmap blits at the offsets the old loop used
 		var offsets:Array<Float> = borderOffsetsFor(s);
@@ -1159,19 +1568,32 @@ class FlxText extends FlxSprite
 		while (i < offsets.length)
 		{
 			m.identity();
-			m.translate(offsets[i], offsets[i + 1]);
-			bd.draw(cache, m);
+			m.tx = bx + offsets[i];
+			m.ty = by + offsets[i + 1];
+			// Clipped to the rebuilt box: outside it the previous pixels are already correct.
+			bd.draw(cache, m, null, null, clip, false);
 			i += 2;
 		}
+		#if hudtext_profile
+		HudTextProf.mark(5);
+		#end
 
 		// 3) the fill-coloured text on top, exactly like the last pass of the old loop
+		#if hudtext_profile
+		HudTextProf.noteExtra(4, __t0);
+		__t0 = HudTextProf.stamp();
+		#end
 		applyFormats(_formatAdjusted, false);
 		m.identity();
 		if (s != 1)
 			m.scale(s, s);
 		if (borderStyle == SHADOW)
 			m.translate(-shadowOffset.x * borderSize, -shadowOffset.y * borderSize);
-		drawTextFieldTo(bd);
+		drawTextFieldTo(bd, clip);
+		#if hudtext_profile
+		HudTextProf.mark(6);
+		HudTextProf.noteExtra(3, __t0);
+		#end
 	}
 
 	/** The pre-existing render pass, kept for transparent borders and as the benchmark baseline. */
