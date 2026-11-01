@@ -66,6 +66,13 @@ class HudTextProf
 	static var verifyDiffPixels:Int = 0;
 	static var verifyMaxDelta:Int = 0;
 	static var verifyBadSamples:Int = 0;
+	/** Frames whose end-of-update score line did not match the model (must stay 0). */
+	static var staleFrames:Int = 0;
+	/** Per-frame HUD-text cost: every rebuild that landed inside one frame, summed. */
+	static var frameRows:Array<Float> = [];
+	static var frameSum:Float = 0;
+	static var frameHits:Int = 0;
+	static var frameMulti:Int = 0;
 	static var totalRows:Int = 0;
 	static var csvStarted:Bool = false;
 
@@ -183,6 +190,8 @@ class HudTextProf
 		rows.push(TextProf.tLoop - snapLoop);
 		rows.push(TextProf.tEngine - snapTE);
 		totalRows++;
+		frameSum += total;
+		frameHits++;
 	}
 
 	/** Cheap heartbeat from FlxText.draw(); flushes every few seconds and enforces the auto-exit. */
@@ -205,6 +214,20 @@ class HudTextProf
 		}
 	}
 
+	/**
+	 * Frame boundary (top of PlayState.update): closes the bucket the previous frame's draw filled.
+	 * Rebuilds are deferred to FlxText.draw(), so the bucket for frame N is closed at the start of N+1.
+	 */
+	public static function beginFrame():Void
+{
+		if (frameHits <= 0) return;
+		frameRows.push(frameSum * 1000000.0);
+		if (frameHits > 1) frameMulti++;
+		if (frameRows.length > 40000) frameRows.shift();
+		frameSum = 0;
+		frameHits = 0;
+}
+
 	/** One rebuild finished: how wide its repaint was, and whether it had to redraw everything. */
 	public static function noteDirty(widthPx:Float, isFull:Bool):Void
 	{
@@ -218,6 +241,12 @@ class HudTextProf
 			partialCount++;
 			if (widthPx > 0) dirtyWs.push(widthPx);
 		}
+	}
+
+	/** The HUD line was still behind the model at the end of the frame (stock "already new" assertion). */
+	public static function noteStale():Void
+	{
+		staleFrames++;
 	}
 
 	/** Result of one HUDTEXT_VERIFY comparison. */
@@ -322,6 +351,18 @@ class HudTextProf
 			}
 			line += ']';
 			for (i in 0...extra.length) extra[i] = 0;
+		}
+		if (frameRows.length > 0)
+		{
+			line += ' frame=' + pct(frameRows, 0.5) + '/' + pct(frameRows, 0.9) + '/' + pct(frameRows, 0.99)
+				 + ' frames=' + frameRows.length + ' multi=' + frameMulti;
+			frameRows.resize(0);
+			frameMulti = 0;
+		}
+		if (staleFrames > 0)
+		{
+			line += ' stale=' + staleFrames;
+			staleFrames = 0;
 		}
 		if (verifySamples > 0)
 		{
