@@ -1506,7 +1506,12 @@ class FlxText extends FlxSprite
 			&& (borderStyle == OUTLINE || borderStyle == OUTLINE_FAST)
 			&& bd.getSurface() != null && cache.getSurface() != null)
 		{
-			applyFormats(_formatAdjusted, false);
+			// The scratch raster carries the *border* colour: the ring is this raster painted at each
+			// offset, and the fill is the fill colour through its alpha. Drawing it in the fill colour
+			// instead forces the ring through a mask, which samples nearest and quantizes fractional
+			// offsets (visible at 1.5x as a displaced outline).
+			var fillColor:Int = _defaultFormat.color;
+			applyFormats(_formatAdjusted, true);
 			#if hudtext_profile
 			HudTextProf.mark(3);
 			HudTextProf.noteExtra(1, __t0);
@@ -1526,14 +1531,14 @@ class FlxText extends FlxSprite
 			#end
 
 			FlxTextStamp.begin(bd, cache, clip);
-			FlxTextStamp.border(borderOffsetsFor(s), bx, by, borderColor, 1);
+			FlxTextStamp.border(borderOffsetsFor(s), bx, by);
 			#if hudtext_profile
 			HudTextProf.mark(5);
 			HudTextProf.noteExtra(4, __t0);
 			__t0 = HudTextProf.stamp();
 			#end
 
-			FlxTextStamp.fill(bx, by);
+			FlxTextStamp.fill(fillColor, bx, by);
 			FlxTextStamp.end();
 			#if hudtext_profile
 			HudTextProf.mark(6);

@@ -14,12 +14,17 @@ import lime.math.Matrix3;
 /**
  * Cairo compositing pass for FlxText's border and fill.
  *
- * FlxText rasterizes its text exactly once, in the *fill* colour, into a scratch bitmap. The
- * border only ever needs that raster's alpha channel - it is painted in one flat colour - so
- * instead of a second rasterization in the border colour (which is what the historical
- * `1 + 8 * iterations` TextField draws did, twice per rebuild) the solid border colour is painted
- * through the raster's alpha at every border offset, and the fill is painted from the raster
- * itself. Same pixels, one glyph rasterization.
+ * FlxText rasterizes its text exactly once, in the *border* colour, into a scratch bitmap. The
+ * border is then that raster painted at every border offset, and the fill is the fill colour
+ * painted through the raster's alpha - instead of the historical `1 + 8 * iterations` TextField
+ * draws (17 for the HUD's `borderSize = 2`), each of which re-rasterized or re-laid-out the field.
+ *
+ * The border copies go through `setSourceSurface() + paint()` on purpose: a surface source is
+ * resampled at the *fractional* offset (the same bilinear sampling the rasterizer applies when the
+ * TextField itself is drawn at that offset), so a 1.5x scale - where the ring sits 1.5 and 3
+ * device pixels out - composites pixel-identically to the historical path. `cairo_mask()` samples
+ * the pattern nearest-neighbour, which quantizes the ring to whole pixels; at 1.5x that shifted
+ * the outline by up to a pixel (666 pixels differing by up to 79/255 in the harness comparison).
  *
  * The pass is clipped to the caller's rectangle, which is what makes an incremental rebuild
  * possible: a clip can only remove contributions outside it, so the pixels inside are exactly
@@ -67,8 +72,8 @@ class FlxTextStamp
 		if (_source != source || _sourceSurface != ss || _pattern == null)
 		{
 			_pattern = CairoPattern.createForSurface(ss);
-			// the historical BitmapData.draw() path samples with NEAREST (its smoothing argument is
-			// false), and the offsets are fractional, so the filter has to match
+			// the fill is composited through the mask at an integral offset, so the filter never
+			// resamples; NEAREST keeps it exactly the rasterized alpha
 			_pattern.filter = CairoFilter.NEAREST;
 			_source = source;
 			_sourceSurface = ss;
@@ -87,35 +92,35 @@ class FlxTextStamp
 	}
 
 	/**
-	 * Paints the border: the solid colour `color` through the raster's alpha, once per offset.
+	 * Paints the border: the raster (already in the border colour) once per offset.
 	 * `bx`/`by` place the raster on the target; `offsets` are the (x, y) pairs of FlxText.
 	 */
-	public static function border(offsets:Array<Float>, bx:Float, by:Float, color:Int, alpha:Float):Void
+	public static function border(offsets:Array<Float>, bx:Float, by:Float):Void
 	{
-		_cairo.setSourceRGBA(((color >> 16) & 0xFF) / 255, ((color >> 8) & 0xFF) / 255, (color & 0xFF) / 255, alpha);
-
+		// the offset goes into the pattern, not the CTM: setSourceSurface() + paint() composites
+		// the fragment at a fractional position exactly like the surface translated by the CTM,
+		// without a save/translate/restore pair per offset
 		var i:Int = 0;
 		while (i < offsets.length)
 		{
-			_matrix.tx = bx + offsets[i];
-			_matrix.ty = by + offsets[i + 1];
-			_pattern.matrix = _matrix;
-			_cairo.mask(_pattern);
+			_cairo.setSourceSurface(_sourceSurface, bx + offsets[i], by + offsets[i + 1]);
+			_cairo.paint();
 			i += 2;
 		}
 	}
 
 	/**
-	 * Paints the fill: the raster itself, at its own place in the target. A surface copy (rather
-	 * than another mask) keeps the text pixels bit-identical to the historical pass, which also
-	 * painted the rasterized text with a plain composite.
+	 * Paints the fill: the fill colour through the raster's alpha, at the raster's own place in the
+	 * target (an integral offset, so the composition is exact).
 	 */
-	public static function fill(bx:Float, by:Float):Void
+	public static function fill(color:Int, bx:Float, by:Float):Void
 	{
+		// the text renderer treats TextFormat.color as RGB (its alpha is not used), so the fill is
+		// opaque here as well
 		_cairo.save();
 		_cairo.translate(bx, by);
-		_cairo.setSourceSurface(_sourceSurface, 0, 0);
-		_cairo.paint();
+		_cairo.setSourceRGBA(((color >> 16) & 0xFF) / 255, ((color >> 8) & 0xFF) / 255, (color & 0xFF) / 255, 1);
+		_cairo.mask(_pattern);
 		_cairo.restore();
 	}
 
@@ -138,10 +143,10 @@ class FlxTextStamp
 		return false;
 	}
 
-	public static function border(offsets:Array<Float>, bx:Float, by:Float, color:Int, alpha:Float):Void
+	public static function border(offsets:Array<Float>, bx:Float, by:Float):Void
 	{}
 
-	public static function fill(bx:Float, by:Float):Void
+	public static function fill(color:Int, bx:Float, by:Float):Void
 	{}
 
 	public static function end():Void
