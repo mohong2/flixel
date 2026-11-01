@@ -964,10 +964,17 @@ class FlxCamera extends FlxBasic
 		else
 		{
 			canvas = new Sprite();
+			// The camera always records a full-view fill() before the batches, so the
+			// canvas already has bounds for the frame; the per-batch quad rescan in
+			// Graphics.drawQuads only widens a rectangle nobody re-reads. Rendering is
+			// unaffected: Graphics falls back to the scan when bounds are still null
+			// (transparent background cameras that skip fill()).
+			canvas.graphics.skipQuadBounds = true;
 			_scrollRect.addChild(canvas);
 
 			#if FLX_DEBUG
 			debugLayer = new Sprite();
+			debugLayer.graphics.skipQuadBounds = true;
 			_scrollRect.addChild(debugLayer);
 			#end
 		}
