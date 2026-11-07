@@ -2,31 +2,34 @@ package flixel.system;
 
 import flash.display.Bitmap;
 import flash.display.BitmapData;
-import flash.display.BlendMode;
 import flash.display.Sprite;
 import flash.Lib;
 import flash.text.TextField;
 import flash.text.TextFormat;
+import flash.text.TextFormatAlign;
 import flixel.FlxG;
 
-@:keep @:bitmap("assets/images/preloader/light.png")
-private class GraphicLogoLight extends BitmapData {}
-
-@:keep @:bitmap("assets/images/preloader/corners.png")
-private class GraphicLogoCorners extends BitmapData {}
-
 /**
- * This is the Default HaxeFlixel Themed Preloader
- * You can make your own style of Preloader by overriding `FlxPreloaderBase` and using this class as an example.
- * To use your Preloader, simply change `Project.xml` to say: `<app preloader="class.path.MyPreloader" />`
+ * Minimal web-download preloader: a pure black screen with a hairline progress line and a
+ * small percentage. Native targets never see this class (FlxBasePreloader skips itself
+ * there), and it is deliberately logo-free: the branded boot splash — the classic flixel
+ * mark whose four corner pieces fly into the centre, with the jingle and the real loading
+ * bar — is drawn by the game's boot state (SeiunEngine's states.BootState) the moment the
+ * FlxGame starts. Keeping this download screen plain avoids showing two logo screens in a
+ * row on web.
  */
 class FlxPreloader extends FlxBasePreloader
 {
-	var _buffer:Sprite;
-	var _bmpBar:Bitmap;
+	static inline var BAR_WIDTH_RATIO:Float = 0.42;
+	static inline var BAR_HEIGHT:Float = 3;
+	static inline var BAR_Y_RATIO:Float = 0.86;
+
+	var _barFill:Sprite;
 	var _text:TextField;
-	var _logo:Sprite;
-	var _logoGlow:Sprite;
+	var _barWidth:Float;
+	var _barX:Float;
+	var _barY:Float;
+	var _displayed:Float = 0;
 
 	/**
 	 * Initialize your preloader here.
@@ -43,76 +46,37 @@ class FlxPreloader extends FlxBasePreloader
 
 	/**
 	 * This class is called as soon as the FlxPreloaderBase has finished initializing.
-	 * Override it to draw all your graphics and things - make sure you also override update
 	 * Make sure you call super.create()
 	 */
 	override function create():Void
 	{
-		_buffer = new Sprite();
-		_buffer.scaleX = _buffer.scaleY = 2;
-		addChild(_buffer);
-		_width = Std.int(Lib.current.stage.stageWidth / _buffer.scaleX);
-		_height = Std.int(Lib.current.stage.stageHeight / _buffer.scaleY);
-		_buffer.addChild(new Bitmap(new BitmapData(_width, _height, false, 0x00345e)));
+		_width = Lib.current.stage.stageWidth;
+		_height = Lib.current.stage.stageHeight;
 
-		var logoLight = createBitmap(GraphicLogoLight, function(logoLight:Bitmap)
-		{
-			logoLight.width = logoLight.height = _height;
-			logoLight.x = (_width - logoLight.width) / 2;
-		});
-		logoLight.smoothing = true;
-		_buffer.addChild(logoLight);
-		_bmpBar = new Bitmap(new BitmapData(1, 7, false, 0x5f6aff));
-		_bmpBar.x = 4;
-		_bmpBar.y = _height - 11;
-		_buffer.addChild(_bmpBar);
+		addChild(new Bitmap(new BitmapData(_width, _height, false, 0x000000)));
+
+		_barWidth = _width * BAR_WIDTH_RATIO;
+		_barX = (_width - _barWidth) / 2;
+		_barY = _height * BAR_Y_RATIO;
+
+		var track = new Sprite();
+		track.graphics.beginFill(0xFFFFFF, 0.14);
+		track.graphics.drawRoundRect(_barX, _barY, _barWidth, BAR_HEIGHT, BAR_HEIGHT, BAR_HEIGHT);
+		track.graphics.endFill();
+		addChild(track);
+
+		_barFill = new Sprite();
+		addChild(_barFill);
 
 		_text = new TextField();
-		_text.defaultTextFormat = new TextFormat(FlxAssets.FONT_DEFAULT, 8, 0x5f6aff);
+		_text.defaultTextFormat = new TextFormat(FlxAssets.FONT_DEFAULT, 10, 0x9EA0B5, false, false, false, null, null, TextFormatAlign.CENTER);
 		_text.embedFonts = true;
 		_text.selectable = false;
 		_text.multiline = false;
-		_text.x = 2;
-		_text.y = _bmpBar.y - 11;
-		_text.width = 200;
-		_buffer.addChild(_text);
-
-		_logo = new Sprite();
-		FlxAssets.drawLogo(_logo.graphics);
-		_logo.scaleX = _logo.scaleY = _height / 8 * 0.04;
-		_logo.x = (_width - _logo.width) / 2;
-		_logo.y = (_height - _logo.height) / 2;
-		_buffer.addChild(_logo);
-		_logoGlow = new Sprite();
-		FlxAssets.drawLogo(_logoGlow.graphics);
-		_logoGlow.blendMode = BlendMode.SCREEN;
-		_logoGlow.scaleX = _logoGlow.scaleY = _height / 8 * 0.04;
-		_logoGlow.x = (_width - _logoGlow.width) / 2;
-		_logoGlow.y = (_height - _logoGlow.height) / 2;
-		_buffer.addChild(_logoGlow);
-		var corners = createBitmap(GraphicLogoCorners, function(corners)
-		{
-			corners.width = _width;
-			corners.height = height;
-		});
-		corners.smoothing = true;
-		_buffer.addChild(corners);
-
-		var bitmap = new Bitmap(new BitmapData(_width, _height, false, 0xffffff));
-		var i:Int = 0;
-		var j:Int = 0;
-		while (i < _height)
-		{
-			j = 0;
-			while (j < _width)
-			{
-				bitmap.bitmapData.setPixel(j++, i, 0);
-			}
-			i += 2;
-		}
-		bitmap.blendMode = BlendMode.OVERLAY;
-		bitmap.alpha = 0.25;
-		_buffer.addChild(bitmap);
+		_text.width = _barWidth;
+		_text.x = _barX;
+		_text.y = _barY - 18;
+		addChild(_text);
 
 		super.create();
 	}
@@ -123,60 +87,32 @@ class FlxPreloader extends FlxBasePreloader
 	 */
 	override function destroy():Void
 	{
-		if (_buffer != null)
-		{
-			removeChild(_buffer);
-		}
-		_buffer = null;
-		_bmpBar = null;
+		if (_barFill != null)
+			removeChild(_barFill);
+		if (_text != null)
+			removeChild(_text);
+		_barFill = null;
 		_text = null;
-		_logo = null;
-		_logoGlow = null;
 		super.destroy();
 	}
 
 	/**
-	 * Update is called every frame, passing the current percent loaded. Use this to change your loading bar or whatever.
+	 * Update is called every frame, passing the current percent loaded. The rendered value
+	 * chases the real one so the line moves smoothly even when progress lands in bursts.
 	 * @param	Percent	The percentage that the project is loaded
 	 */
 	override public function update(Percent:Float):Void
 	{
-		_bmpBar.scaleX = Percent * (_width - 8);
-		_text.text = Std.string(FlxG.VERSION) + " " + Std.int(Percent * 100) + "%";
+		_displayed += (Percent - _displayed) * 0.18;
 
-		if (Percent < 0.1)
+		_barFill.graphics.clear();
+		var fillWidth:Float = _barWidth * _displayed;
+		if (fillWidth > 0.5)
 		{
-			_logoGlow.alpha = 0;
-			_logo.alpha = 0;
+			_barFill.graphics.beginFill(0xFFFFFF, 0.85);
+			_barFill.graphics.drawRoundRect(_barX, _barY, fillWidth, BAR_HEIGHT, BAR_HEIGHT, BAR_HEIGHT);
+			_barFill.graphics.endFill();
 		}
-		else if (Percent < 0.15)
-		{
-			_logoGlow.alpha = Math.random();
-			_logo.alpha = 0;
-		}
-		else if (Percent < 0.2)
-		{
-			_logoGlow.alpha = 0;
-			_logo.alpha = 0;
-		}
-		else if (Percent < 0.25)
-		{
-			_logoGlow.alpha = 0;
-			_logo.alpha = Math.random();
-		}
-		else if (Percent < 0.7)
-		{
-			_logoGlow.alpha = (Percent - 0.45) / 0.45;
-			_logo.alpha = 1;
-		}
-		else if ((Percent > 0.8) && (Percent < 0.9))
-		{
-			_logoGlow.alpha = 1 - (Percent - 0.8) / 0.1;
-			_logo.alpha = 0;
-		}
-		else if (Percent > 0.9)
-		{
-			_buffer.alpha = 1 - (Percent - 0.9) / 0.1;
-		}
+		_text.text = Std.string(Std.int(_displayed * 100)) + "%";
 	}
 }
