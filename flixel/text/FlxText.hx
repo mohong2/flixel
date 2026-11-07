@@ -21,6 +21,7 @@ import flixel.util.FlxColor;
 import flixel.util.FlxDestroyUtil;
 import flixel.util.helpers.FlxRange;
 import openfl.Assets;
+import openfl.geom.Point;
 import openfl.geom.Rectangle;
 
 using flixel.util.FlxStringUtil;
@@ -201,6 +202,10 @@ class FlxText extends FlxSprite
 	/** Cell this text holds in the shared page, `null` while it owns a private bitmap. */
 	var _pageCell:FlxRect;
 
+	/** Size of the bitmap the cell holds, i.e. the text's own size without the cell padding. */
+	var _pageW:Int = 0;
+	var _pageH:Int = 0;
+
 	/** Whether this text has been refused by the page and must not ask again. */
 	var _pageBanned:Bool = false;
 
@@ -209,6 +214,10 @@ class FlxText extends FlxSprite
 
 	/** Page that owns `_pageCell`. */
 	var _page:FlxTextPage;
+
+	/** Scratch rectangle/point for copying a page cell back into a private bitmap. */
+	static var _pageCopy:Rectangle = new Rectangle();
+	static var _pageCopyAt:Point = new Point(0, 0);
 
 
 
@@ -977,9 +986,19 @@ class FlxText extends FlxSprite
 		// A stamped text has to leave the page before it rasterizes: `graphic.bitmap` is the page
 		// then, and drawing into it would overwrite every other text packed there.
 		var fromPage:Bool = (_pageCell != null);
+		var pageBitmap:BitmapData = null;
+		var pageCell:FlxRect = null;
 		if (fromPage)
 		{
-			detachFromPage();
+			// Hold on to the cell: its pixels are this text's last raster. Copying them into the
+			// private bitmap is what keeps the first change after a stamp incremental instead of
+			// forcing a full re-raster, which is what a text changing while packed used to cost.
+			if (_page != null)
+				pageBitmap = _page.bitmap;
+			pageCell = _pageCell;
+			// The cell is the bitmap plus padding; the rebuild cares about the bitmap.
+			oldWidth = _pageW;
+			oldHeight = _pageH;
 		}
 		else if (graphic != null)
 		{
@@ -1020,7 +1039,7 @@ class FlxText extends FlxSprite
 			width = newWidth;
 			height = newHeight;
 
-			if (_hasBorderAlpha)
+			if (_hasBorderAlpha && !fromPage)
 				_borderPixels = graphic.bitmap.clone();
 			textField.height = newHeight * 1.2;
 			_flashRect.x = 0;
@@ -1029,11 +1048,29 @@ class FlxText extends FlxSprite
 			_flashRect.height = pixelHeight;
 		}
 
+		// Leaving the page: a cell of the same size holds exactly the pixels this text would own,
+		// so migrate them. The rebuild then diffs against `_rasterText`, which still describes
+		// those pixels, and only repaints the run that actually changed.
+		var migrated:Bool = false;
+		if (fromPage && pageBitmap != null && pageCell != null && _pageW == pixelWidth && _pageH == pixelHeight)
+		{
+			_pageCopy.setTo(pageCell.x, pageCell.y, pixelWidth, pixelHeight);
+			migrated = true;
+		}
+
+		detachFromPage(migrated);
+		if (migrated)
+		{
+			graphic.bitmap.copyPixels(pageBitmap, _pageCopy, _pageCopyAt);
+			if (_hasBorderAlpha)
+				_borderPixels = graphic.bitmap.clone();
+		}
+
 		// C-2: the rectangle that actually has to be repainted (null = the whole bitmap)
 		#if hudtext_profile
 		var __td:Float = HudTextProf.stamp();
 		#end
-		var dirty:Rectangle = computeDirtyRect(realloc, pixelWidth, pixelHeight);
+		var dirty:Rectangle = computeDirtyRect(migrated ? false : realloc, pixelWidth, pixelHeight);
 		#if hudtext_profile
 		HudTextProf.noteExtra(5, __td);
 		#end
@@ -1380,6 +1417,8 @@ class FlxText extends FlxSprite
 		// its own stamp (and fill the page with copies of the same bitmap).
 		_page = page;
 		_pageCell = cell;
+		_pageW = source.width;
+		_pageH = source.height;
 		_borderPixels = FlxDestroyUtil.dispose(_borderPixels);
 
 		// Setting `frames` resets the sprite's size to the frame size, which is the bitmap size
@@ -1394,10 +1433,12 @@ class FlxText extends FlxSprite
 	/**
 	 * Gives the page cell back and returns to a private bitmap.
 	 *
-	 * The rebuild that follows reallocates from scratch (see `realloc` in `regenGraphic()`),
-	 * which is also why the recorded raster is invalidated: the fresh bitmap is empty.
+	 * The rebuild that follows reallocates (see `realloc` in `regenGraphic()`). When the caller
+	 * copied the cell's pixels into the new bitmap first, `keepRaster` leaves the recorded raster
+	 * in place so that rebuild can stay incremental; otherwise the fresh bitmap is empty and the
+	 * bookkeeping has to be dropped.
 	 */
-	function detachFromPage():Void
+	function detachFromPage(keepRaster:Bool = false):Void
 	{
 		if (_pageCell == null)
 			return;
@@ -1413,8 +1454,13 @@ class FlxText extends FlxSprite
 
 		_pageCell = null;
 		_page = null;
-		_rasterSig = null;
-		_rasterText = null;
+		_pageW = 0;
+		_pageH = 0;
+		if (!keepRaster)
+		{
+			_rasterSig = null;
+			_rasterText = null;
+		}
 		_borderPixels = FlxDestroyUtil.dispose(_borderPixels);
 	}
 
