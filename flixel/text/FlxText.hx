@@ -275,16 +275,6 @@ class FlxText extends FlxSprite
 	/** Reused storage for the rectangle an incremental rebuild repaints. */
 	var _dirtyRect:Rectangle = new Rectangle();
 
-	#if hudtext_profile
-	/** Scratch bitmap for the HUDTEXT_VERIFY self-check (incremental rebuild vs full redraw). */
-	var _verifyBitmap:BitmapData;
-	var __verifyLogs:Int = 0;
-	var _dbgX0:Float = 0;
-	var _dbgX1:Float = 0;
-	var _dbgTW:Float = 0;
-	var _dbgOX:Float = 0;
-	var _dbgAlign:String = "";
-	#end
 
 	#if flash
 	/**
@@ -976,9 +966,6 @@ class FlxText extends FlxSprite
 			return;
 		}
 
-		#if hudtext_profile
-		HudTextProf.begin(textField.width, (textField.text == null) ? 0 : textField.text.length);
-		#end
 
 		var oldWidth:Int = 0;
 		var oldHeight:Int = VERTICAL_GUTTER;
@@ -1010,10 +997,6 @@ class FlxText extends FlxSprite
 		// Account for gutter
 		var newHeight:Float = textField.textHeight + VERTICAL_GUTTER;
 
-		#if hudtext_profile
-		HudTextProf.mark(1);
-		HudTextProf.meta(textField.textWidth, _textRenderScale);
-		#end
 
 		// prevent text height from shrinking on flash if text == ""
 		if (textField.textHeight == 0)
@@ -1067,13 +1050,7 @@ class FlxText extends FlxSprite
 		}
 
 		// C-2: the rectangle that actually has to be repainted (null = the whole bitmap)
-		#if hudtext_profile
-		var __td:Float = HudTextProf.stamp();
-		#end
 		var dirty:Rectangle = computeDirtyRect(migrated ? false : realloc, pixelWidth, pixelHeight);
-		#if hudtext_profile
-		HudTextProf.noteExtra(5, __td);
-		#end
 
 		if (dirty == null)
 		{
@@ -1095,28 +1072,17 @@ class FlxText extends FlxSprite
 				_borderPixels.fillRect(dirty, FlxColor.TRANSPARENT);
 		}
 
-		#if hudtext_profile
-		HudTextProf.mark(2);
-		HudTextProf.noteDirty((dirty == null) ? 0 : dirty.width, dirty == null);
-		#end
 
 		if (textField != null && textField.text != null && textField.text.length > 0)
 		{
 			renderText(dirty);
 		}
 
-		#if hudtext_profile
-		if (dirty != null && HudTextProf.verify)
-			verifyDirtyRaster();
-		#end
 
 		_regen = false;
 		resetFrame();
 		rememberRaster();
 
-		#if hudtext_profile
-		HudTextProf.end();
-		#end
 	}
 
 	/**
@@ -1174,9 +1140,6 @@ class FlxText extends FlxSprite
 
 	override public function draw():Void
 	{
-		#if hudtext_profile
-		HudTextProf.tick();
-		#end
 		regenGraphic();
 
 		// Draw the high-res bitmap in logical coordinates with an equivalent origin.
@@ -1551,13 +1514,6 @@ class FlxText extends FlxSprite
 		// border's reach, which is drawn up to borderSize * s pixels outside the glyphs.
 		var s:Float = _textRenderScale;
 		var reach:Int = Std.int(Math.ceil(borderSize * s)) + 2 + Std.int(Math.ceil(2 * s));
-		#if hudtext_profile
-		_dbgX0 = x0;
-		_dbgX1 = x1;
-		_dbgTW = textW;
-		_dbgOX = oxFor(textW);
-		_dbgAlign = Std.string(_defaultFormat.align);
-		#end
 		var dx0:Int = Std.int(Math.floor(x0 * s)) - reach;
 		var dx1:Int = Std.int(Math.ceil(x1 * s)) + reach;
 		if (dx0 < 0) dx0 = 0;
@@ -1600,105 +1556,6 @@ class FlxText extends FlxSprite
 		return (r == null) ? -1 : r.x;
 	}
 
-	#if hudtext_profile
-	/**
-	 * HUDTEXT_VERIFY: repaint the same text fully into a scratch bitmap and compare it with the
-	 * incrementally rebuilt one. Any differing pixel means the rebuilt box missed something, so
-	 * this is the evidence that clipping the draws leaves the bitmap bit-identical.
-	 */
-	function verifyDirtyRaster():Void
-	{
-		var bd:BitmapData = graphic.bitmap;
-		var w:Int = bd.width;
-		var h:Int = bd.height;
-		if (_verifyBitmap == null || _verifyBitmap.width != w || _verifyBitmap.height != h)
-		{
-			if (_verifyBitmap != null)
-				_verifyBitmap.dispose();
-			_verifyBitmap = new BitmapData(w, h, true, FlxColor.TRANSPARENT);
-		}
-		_verifyBitmap.fillRect(_verifyBitmap.rect, FlxColor.TRANSPARENT);
-		renderText(null, _verifyBitmap);
-
-		var rect:Rectangle = _verifyBitmap.rect;
-		var pa:ByteArray = bd.getPixels(rect);
-		var pb:ByteArray = _verifyBitmap.getPixels(rect);
-		pa.position = 0;
-		pb.position = 0;
-		var diffs:Int = 0;
-		var maxd:Int = 0;
-		var minX:Int = w;
-		var maxX:Int = -1;
-		var minY:Int = h;
-		var maxY:Int = -1;
-		var inkAMinX:Int = w;
-		var inkAMaxX:Int = -1;
-		var inkBMinX:Int = w;
-		var inkBMaxX:Int = -1;
-		var samples:StringBuf = new StringBuf();
-		for (i in 0...(w * h))
-		{
-			var a0:Int = pa.readUnsignedByte();
-			var a1:Int = pa.readUnsignedByte();
-			var a2:Int = pa.readUnsignedByte();
-			var aa:Int = pa.readUnsignedByte();
-			var b0:Int = pb.readUnsignedByte();
-			var b1:Int = pb.readUnsignedByte();
-			var b2:Int = pb.readUnsignedByte();
-			var ba:Int = pb.readUnsignedByte();
-			// getPixels() hands back ARGB32: the alpha channel is the first byte, not the last
-			var px:Int = i % w;
-			if (a0 > 0)
-			{
-				if (px < inkAMinX) inkAMinX = px;
-				if (px > inkAMaxX) inkAMaxX = px;
-			}
-			if (b0 > 0)
-			{
-				if (px < inkBMinX) inkBMinX = px;
-				if (px > inkBMaxX) inkBMaxX = px;
-			}
-			var d:Int = 0;
-			var v:Int = a0 - b0;
-			if (v < 0) v = -v;
-			d = v;
-			v = a1 - b1;
-			if (v < 0) v = -v;
-			if (v > d) d = v;
-			v = a2 - b2;
-			if (v < 0) v = -v;
-			if (v > d) d = v;
-			v = aa - ba;
-			if (v < 0) v = -v;
-			if (v > d) d = v;
-			if (d > 0)
-			{
-				diffs++;
-				var py:Int = Std.int(i / w);
-				if (px < minX) minX = px;
-				if (px > maxX) maxX = px;
-				if (py < minY) minY = py;
-				if (py > maxY) maxY = py;
-				if (diffs <= 3)
-				{
-					samples.add(' (' + px + ',' + py + ') A=' + a0 + '/' + a1 + '/' + a2 + '/' + aa + ' B=' + b0 + '/' + b1 + '/' + b2 + '/' + ba);
-				}
-			}
-			if (d > maxd) maxd = d;
-		}
-		if (diffs > 0 && __verifyLogs < 4)
-		{
-			__verifyLogs++;
-			HudTextProf.log('[verify] diff=' + diffs + ' box=' + minX + '..' + maxX + ' x ' + minY + '..' + maxY
-				+ ' dirty=' + _dirtyRect.x + '+' + _dirtyRect.width
-				+ ' x0=' + _dbgX0 + ' x1=' + _dbgX1 + ' tw=' + _dbgTW + ' ox=' + _dbgOX
-				+ ' fw=' + textField.width + ' s=' + _textRenderScale + ' align=' + _dbgAlign
-				+ ' inkA=' + inkAMinX + '..' + inkAMaxX + ' inkB=' + inkBMinX + '..' + inkBMaxX + samples.toString()
-				+ ' old="' + _rasterText + '" new="' + textField.text + '"');
-		}
-		HudTextProf.noteVerify(diffs, maxd);
-	}
-	#end
 
 	inline static function pushRingOffset(out:Array<Float>, c:Float):Void
 	{
@@ -1818,14 +1675,7 @@ class FlxText extends FlxSprite
 			bw = 1;
 		if (bh < 1)
 			bh = 1;
-		#if hudtext_profile
-		var __t0:Float = HudTextProf.stamp();
-		#end
 		var cache:BitmapData = ensureTextCache(bw, bh);
-		#if hudtext_profile
-		HudTextProf.noteExtra(0, __t0);
-		__t0 = HudTextProf.stamp();
-		#end
 
 		// Fast path: rasterize the text once, in the fill colour, and composite the border out of
 		// that raster's alpha (see FlxTextStamp). Only for a single border/fill colour - format
@@ -1842,11 +1692,6 @@ class FlxText extends FlxSprite
 			// offsets (visible at 1.5x as a displaced outline).
 			var fillColor:Int = _defaultFormat.color;
 			applyFormats(_formatAdjusted, true);
-			#if hudtext_profile
-			HudTextProf.mark(3);
-			HudTextProf.noteExtra(1, __t0);
-			__t0 = HudTextProf.stamp();
-			#end
 
 			_matrix.identity();
 			_matrix.a = s;
@@ -1854,47 +1699,23 @@ class FlxText extends FlxSprite
 			_matrix.tx = -bx;
 			_matrix.ty = -by;
 			cache.draw(textField, _matrix);
-			#if hudtext_profile
-			HudTextProf.mark(4);
-			HudTextProf.noteExtra(2, __t0);
-			__t0 = HudTextProf.stamp();
-			#end
 
 			FlxTextStamp.begin(bd, cache, clip);
 			FlxTextStamp.border(borderOffsetsFor(s), bx, by);
-			#if hudtext_profile
-			HudTextProf.mark(5);
-			HudTextProf.noteExtra(4, __t0);
-			__t0 = HudTextProf.stamp();
-			#end
 
 			FlxTextStamp.fill(fillColor, bx, by);
 			FlxTextStamp.end();
-			#if hudtext_profile
-			HudTextProf.mark(6);
-			HudTextProf.noteExtra(3, __t0);
-			#end
 			return;
 		}
 
 		// 1) rasterize the border-coloured text once, into the box-sized scratch bitmap
 		applyFormats(_formatAdjusted, true);
-		#if hudtext_profile
-		HudTextProf.mark(3);
-		HudTextProf.noteExtra(1, __t0);
-		__t0 = HudTextProf.stamp();
-		#end
 		_matrix.identity();
 		_matrix.a = s;
 		_matrix.d = s;
 		_matrix.tx = -bx;
 		_matrix.ty = -by;
 		cache.draw(textField, _matrix);
-		#if hudtext_profile
-		HudTextProf.mark(4);
-		HudTextProf.noteExtra(2, __t0);
-		__t0 = HudTextProf.stamp();
-		#end
 
 		// 2) the border itself: plain bitmap blits at the offsets the old loop used
 		var offsets:Array<Float> = borderOffsetsFor(s);
@@ -1909,15 +1730,8 @@ class FlxText extends FlxSprite
 			bd.draw(cache, m, null, null, clip, false);
 			i += 2;
 		}
-		#if hudtext_profile
-		HudTextProf.mark(5);
-		#end
 
 		// 3) the fill-coloured text on top, exactly like the last pass of the old loop
-		#if hudtext_profile
-		HudTextProf.noteExtra(4, __t0);
-		__t0 = HudTextProf.stamp();
-		#end
 		applyFormats(_formatAdjusted, false);
 		m.identity();
 		if (s != 1)
@@ -1925,10 +1739,6 @@ class FlxText extends FlxSprite
 		if (borderStyle == SHADOW)
 			m.translate(-shadowOffset.x * borderSize, -shadowOffset.y * borderSize);
 		drawTextFieldTo(bd, clip);
-		#if hudtext_profile
-		HudTextProf.mark(6);
-		HudTextProf.noteExtra(3, __t0);
-		#end
 	}
 
 	/** The pre-existing render pass, kept for transparent borders and as the benchmark baseline. */
