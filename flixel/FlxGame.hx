@@ -833,7 +833,9 @@ class FlxGame extends Sprite
 		#end
 
 		// Destroy the old state (if there is an old state)
-		if (_state != null)
+		// Never destroy the state we are about to create: FlxGroup.destroy() nulls
+		// members, so re-creating the same instance throws in add().
+		if (_state != null && _state != _requestedState)
 			_state.destroy();
 
 		// we need to clear bitmap cache only after previous state is destroyed, which will reset useCount for FlxGraphic objects
