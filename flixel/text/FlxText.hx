@@ -12,8 +12,10 @@ import flixel.graphics.FlxGraphic;
 import flixel.graphics.atlas.FlxAtlas;
 import flixel.graphics.atlas.FlxNode;
 import flixel.graphics.frames.FlxFramesCollection;
+import flixel.graphics.frames.FlxImageFrame;
 import flixel.math.FlxMath;
 import flixel.math.FlxPoint;
+import flixel.math.FlxRect;
 import flixel.system.FlxAssets;
 import flixel.util.FlxColor;
 import flixel.util.FlxDestroyUtil;
@@ -44,6 +46,25 @@ class FlxText extends FlxSprite
 
 	/** Transparent margin around the glyph box in the border scratch bitmap, in device pixels. */
 	static inline var TEXT_PAD:Int = 2;
+
+	/**
+	 * How long the content signature has to stay unchanged before the finished bitmap is moved
+	 * into the shared page (see `considerPageStamp()`).
+	 *
+	 * Long enough that the burst of `setFormat`/`text` calls a state does while it builds its
+	 * HUD never reaches the page, short enough that a line that is genuinely static is packed
+	 * before the player looks at it.
+	 */
+	static inline var PAGE_SETTLE_MS:Float = 750;
+
+	/**
+	 * How often a text may leave the page before it is kept private for good.
+	 *
+	 * Once is expected: the render scale settles shortly after boot and re-rasterizes every
+	 * text at the final scale. Twice or more means the line keeps changing, and cycling it in
+	 * and out of the page would cost a page copy and a texture upload each time.
+	 */
+	static inline var MAX_PAGE_DETACHES:Int = 1;
 
 	/**
 	 * The text being displayed.
@@ -162,6 +183,34 @@ class FlxText extends FlxSprite
 	 * Helper boolean which tells whether to update graphic of this text object or not.
 	 */
 	var _regen:Bool = true;
+
+	/**
+	 * Content signature of the bitmap that is currently rasterized (see `contentSignature()`),
+	 * or `null` when the bitmap is not known to match the current inputs.
+	 *
+	 * `_regen` only says "someone asked for a rebuild"; it is set for inputs that are re-applied
+	 * unchanged (a repeated `setFormat`, a `fieldWidth` write, a render-scale re-read), and
+	 * rebuilding on those re-rasterizes the whole TextField for a bitmap that would not change a
+	 * pixel. This signature is what actually decides whether a rebuild has any work to do.
+	 */
+	var _rasterSig:String;
+
+	/** `FlxG.game.ticks` at the last rasterization, used by the static-text settle timer. */
+	var _rasterAt:Float = 0;
+
+	/** Cell this text holds in the shared page, `null` while it owns a private bitmap. */
+	var _pageCell:FlxRect;
+
+	/** Whether this text has been refused by the page and must not ask again. */
+	var _pageBanned:Bool = false;
+
+	/** How often this text left the page, i.e. how often it changed after being packed. */
+	var _pageDetaches:Int = 0;
+
+	/** Page that owns `_pageCell`. */
+	var _page:FlxTextPage;
+
+
 
 	/**
 	 * Rasterization scale for the current text bitmap.
@@ -289,6 +338,13 @@ class FlxText extends FlxSprite
 	 */
 	override public function destroy():Void
 	{
+		if (_pageCell != null && _page != null)
+		{
+			_page.release(_pageCell);
+			_pageCell = null;
+			_page = null;
+		}
+
 		if (_textCache != null)
 		{
 			_textCache.dispose();
@@ -304,6 +360,11 @@ class FlxText extends FlxSprite
 
 	override public function drawFrame(Force:Bool = false):Void
 	{
+		// A forced redraw is the caller saying the pixels are stale (the public `textField` was
+		// poked directly), so it has to bypass the content-signature short circuit.
+		if (Force)
+			_rasterSig = null;
+
 		_regen = _regen || Force;
 		super.drawFrame(_regen);
 	}
@@ -889,7 +950,22 @@ class FlxText extends FlxSprite
 		}
 
 		if (!_regen)
+		{
+			considerPageStamp();
 			return;
+		}
+
+		// The bitmap is a pure function of the content signature: the same inputs produce the
+		// same pixels, so an unchanged signature means a rebuild would repaint exactly what is
+		// already there. flixel and the game both set `_regen` for inputs they re-apply
+		// unchanged (a repeated `setFormat`, a `fieldWidth` write, a render-scale re-read), which
+		// is why "no regen" cannot be the criterion for packing static text and this is.
+		if (_rasterSig != null && _rasterSig == contentSignature())
+		{
+			_regen = false;
+			considerPageStamp();
+			return;
+		}
 
 		#if hudtext_profile
 		HudTextProf.begin(textField.width, (textField.text == null) ? 0 : textField.text.length);
@@ -898,7 +974,14 @@ class FlxText extends FlxSprite
 		var oldWidth:Int = 0;
 		var oldHeight:Int = VERTICAL_GUTTER;
 
-		if (graphic != null)
+		// A stamped text has to leave the page before it rasterizes: `graphic.bitmap` is the page
+		// then, and drawing into it would overwrite every other text packed there.
+		var fromPage:Bool = (_pageCell != null);
+		if (fromPage)
+		{
+			detachFromPage();
+		}
+		else if (graphic != null)
 		{
 			oldWidth = graphic.width;
 			oldHeight = graphic.height;
@@ -922,7 +1005,9 @@ class FlxText extends FlxSprite
 		var pixelWidth:Int = Std.int(Math.max(1, newWidth * _textRenderScale));
 		var pixelHeight:Int = Std.int(Math.max(1, newHeight * _textRenderScale));
 
-		var realloc:Bool = (oldWidth != pixelWidth || oldHeight != pixelHeight);
+		// `fromPage` forces the reallocation: the page is never the size of this one text, and
+		// the rebuild has to start from a bitmap this text owns.
+		var realloc:Bool = fromPage || (oldWidth != pixelWidth || oldHeight != pixelHeight);
 
 		if (realloc)
 		{
@@ -1136,6 +1221,203 @@ class FlxText extends FlxSprite
 		return _textCache;
 	}
 
+	/** Milliseconds since the game started, for the static-text settle timer. */
+	inline function uptimeMs():Float
+	{
+		return (FlxG.game != null) ? FlxG.game.ticks : 0;
+	}
+
+	/**
+	 * Everything `renderText()` reads, as one comparable string.
+	 *
+	 * The raster is a pure function of these inputs, so two equal signatures mean a rebuild
+	 * would produce the bitmap that is already there. Only pixel-affecting inputs are listed:
+	 * tint, alpha, blend, position and scale are applied at draw time and must not invalidate
+	 * the raster.
+	 */
+	function contentSignature():String
+	{
+		var f:TextFormat = _defaultFormat;
+		var sb:StringBuf = new StringBuf();
+		sb.add((textField.text == null) ? "" : textField.text);
+		sb.add('|');
+		sb.add(Std.string(f.font));
+		sb.add(',');
+		sb.add(Std.string(f.size));
+		sb.add(',');
+		sb.add(Std.string(f.color));
+		sb.add(',');
+		sb.add(Std.string(f.bold));
+		sb.add(',');
+		sb.add(Std.string(f.italic));
+		sb.add(',');
+		sb.add(Std.string(f.leading));
+		sb.add(',');
+		sb.add(Std.string(f.align));
+		sb.add('|');
+		sb.add(Std.string(alignment));
+		sb.add(',');
+		sb.add(Std.string(borderStyle));
+		sb.add(',');
+		sb.add(Std.string(borderColor));
+		sb.add(',');
+		sb.add(Std.string(borderSize));
+		sb.add(',');
+		sb.add(Std.string(borderQuality));
+		sb.add(',');
+		// `shadowOffset` is created after the first draw in the constructor.
+		sb.add((shadowOffset != null) ? Std.string(shadowOffset.x) : "0");
+		sb.add(',');
+		sb.add((shadowOffset != null) ? Std.string(shadowOffset.y) : "0");
+		sb.add('|');
+		sb.add(Std.string(textField.width));
+		sb.add(',');
+		sb.add(Std.string(textField.multiline));
+		sb.add(',');
+		sb.add(Std.string(textField.wordWrap));
+		sb.add(',');
+		sb.add(Std.string(textField.autoSize));
+		sb.add(',');
+		sb.add(Std.string(textField.embedFonts));
+		sb.add(',');
+		sb.add(Std.string(_textRenderScale));
+
+		if (_formatRanges.length > 0)
+		{
+			sb.add('|');
+			for (formatRange in _formatRanges)
+			{
+				var range = formatRange.range;
+				var textFormat:TextFormat = formatRange.format.format;
+				sb.add(Std.string(range.start));
+				sb.add('-');
+				sb.add(Std.string(range.end));
+				sb.add(',');
+				sb.add(Std.string(textFormat.color));
+				sb.add(',');
+				sb.add(Std.string(textFormat.bold));
+				sb.add(',');
+				sb.add(Std.string(textFormat.italic));
+				sb.add(',');
+				sb.add(Std.string(textFormat.leading));
+				sb.add(',');
+				sb.add(Std.string(formatRange.format.borderColor));
+				sb.add(';');
+			}
+		}
+
+		return sb.toString();
+	}
+
+	/** Whether this text may hand its bitmap to the shared page at all. */
+	function canUsePage():Bool
+	{
+		// The page only exists for the quad renderer: blit mode draws `framePixels` and would
+		// copy the whole page instead of the cell.
+		if (!FlxG.renderTile)
+			return false;
+		if (graphic == null || graphic.bitmap == null)
+			return false;
+		// A clipped sprite re-frames its bitmap per sprite, and that frame is never cell sized.
+		if (clipRect != null)
+			return false;
+
+		return true;
+	}
+
+	/**
+	 * Moves the finished bitmap into the shared page, once the text has been stable for a while.
+	 *
+	 * Sharing one page graphic is what collapses the texts into one batch - flixel starts a new
+	 * batch whenever the graphic changes - so this only runs while the content signature keeps
+	 * matching: a rebuild never reaches it, and the settle timer keeps the burst of formatting
+	 * a state does while it builds its HUD from ever touching the page.
+	 */
+	function considerPageStamp():Void
+	{
+		if (_pageBanned || _pageCell != null || _regen || _rasterSig == null)
+			return;
+		if (uptimeMs() - _rasterAt < PAGE_SETTLE_MS)
+			return;
+		if (!canUsePage())
+			return;
+
+		var source:BitmapData = graphic.bitmap;
+		if (source == null)
+			return;
+
+		var page:FlxTextPage = FlxTextPage.get();
+		var cell:FlxRect = page.acquire(source.width, source.height);
+
+		if (cell == null)
+		{
+			// The current page is full: carry on in a new one, which is still a single graphic
+			// and therefore still one batch for every line that lands on it.
+			page = FlxTextPage.next();
+			if (page != null)
+				cell = page.acquire(source.width, source.height);
+		}
+
+		if (cell == null)
+		{
+			// No room anywhere (or too many pages already). Asking again next frame cannot
+			// succeed either, so stop proposing this text.
+			_pageBanned = true;
+			return;
+		}
+
+		var pageFrames:FlxImageFrame = FlxImageFrame.fromGraphic(page.graphic, FlxRect.get(cell.x, cell.y, source.width, source.height));
+		if (pageFrames == null)
+		{
+			page.release(cell);
+			return;
+		}
+
+		page.blit(cell, source);
+
+		// Take the cell first, and only then read the size: `width`/`height` re-enter
+		// `regenGraphic()` through their getters, which would stamp this text again from inside
+		// its own stamp (and fill the page with copies of the same bitmap).
+		_page = page;
+		_pageCell = cell;
+		_borderPixels = FlxDestroyUtil.dispose(_borderPixels);
+
+		// Setting `frames` resets the sprite's size to the frame size, which is the bitmap size
+		// (render scale included); the logical size is what the rest of the game sees.
+		var logicalWidth:Float = width;
+		var logicalHeight:Float = height;
+		this.frames = pageFrames;
+		width = logicalWidth;
+		height = logicalHeight;
+	}
+
+	/**
+	 * Gives the page cell back and returns to a private bitmap.
+	 *
+	 * The rebuild that follows reallocates from scratch (see `realloc` in `regenGraphic()`),
+	 * which is also why the recorded raster is invalidated: the fresh bitmap is empty.
+	 */
+	function detachFromPage():Void
+	{
+		if (_pageCell == null)
+			return;
+
+		// A text that changes after it was packed is not static after all: it gets one more
+		// chance (the render scale settles once, early, and re-rasterizes everything), and then
+		// stays private so a line that keeps changing cannot cycle in and out of the page.
+		if (++_pageDetaches > MAX_PAGE_DETACHES)
+			_pageBanned = true;
+
+		if (_page != null)
+			_page.release(_pageCell);
+
+		_pageCell = null;
+		_page = null;
+		_rasterSig = null;
+		_rasterText = null;
+		_borderPixels = FlxDestroyUtil.dispose(_borderPixels);
+	}
+
 	/** Records what the bitmap now shows, so the next rebuild can tell what it may keep. */
 	function rememberRaster():Void
 	{
@@ -1155,6 +1437,8 @@ class FlxText extends FlxSprite
 		_rasterBorderStyle = borderStyle;
 		_rasterAlignment = alignment;
 		_rasterFieldW = textField.width;
+		_rasterSig = contentSignature();
+		_rasterAt = uptimeMs();
 	}
 
 	/**
@@ -1770,7 +2054,7 @@ class FlxText extends FlxSprite
 	}
 }
 
-@:allow(flixel.text.FlxText.applyFormats)
+@:allow(flixel.text.FlxText)
 class FlxTextFormat
 {
 	/**
